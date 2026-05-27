@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rvcircuit-studio"
+version = "0.1.0"
+description = "Desktop CircuitPython IDE with source-level debugger, serial REPL, plotter, and library manager"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Armstrong Subero"}
+]
+keywords = ["circuitpython", "ide", "microcontroller", "embedded", "education"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Education",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Embedded Systems",
+    "Topic :: Education",
+]
+dependencies = [
+    "PySide6>=6.4",
+    "pyserial>=3.5",
+    "pyqtgraph>=0.13",
+    "adafruit-board-toolkit>=1.0",
+]
+
+[project.urls]
+Homepage = "https://rvembedded.com"
+Repository = "https://github.com/ArmstrongSubero/rvcircuit-studio"
+Issues = "https://github.com/ArmstrongSubero/rvcircuit-studio/issues"
+
+[project.scripts]
+rvcircuit-studio = "rvcircuit_studio.app:main"
+
+[project.gui-scripts]
+rvcircuit-studio-gui = "rvcircuit_studio.app:main"
+
+[tool.setuptools.packages.find]
+include = ["rvcircuit_studio*"]
+
+[tool.setuptools.package-data]
+"rvcircuit_studio.qutepart" = ["syntax/data/**/*"]

@@ -1,0 +1,25 @@
+OpenOCD - Open On-Chip Debugger
+
+The OpenOCD binary (WCH fork with WCH-Link support) is licensed under
+the GNU General Public License, version 2.
+
+Copyright (C) Free Software Foundation and contributors.
+
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+Full license text: https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
+
+Source code for the WCH fork of OpenOCD is available at:
+    https://github.com/newbrain/riscv-openocd-wch
+
+If you received a binary distribution of OpenOCD without source code,
+you may obtain the source code from the URL above, or by contacting
+the distributor.
