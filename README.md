@@ -57,6 +57,11 @@ Apache 2.0
 
 Bug reports are welcome open an issue if it's a big bug. Unfortunately due to the prevalance of AI pull requests I won't be accepting them sorry, but reach out to me via email armstrongsubero@gmail.com, I'm very open to suggestions and improvement. 
 
+## AI Policy
+
+While bug reports welcome and you can open an issue. Please no AI generated content in issues or discussions.
+
+
 ## Author
 
 Armstrong Subero @ [rvembedded.com](https://rvembedded.com)
