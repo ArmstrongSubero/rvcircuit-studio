@@ -17,3 +17,5 @@ Thumbs.db
 data/
 *.json.bak
 *.spec
+build_env/
+launcher.py

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rvcircuit-studio"
-version = "0.1.0"
+version = "0.1.5"
 description = "Desktop CircuitPython IDE with source-level debugger, serial REPL, plotter, and library manager"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -48,4 +48,9 @@ rvcircuit-studio-gui = "rvcircuit_studio.app:main"
 include = ["rvcircuit_studio*"]
 
 [tool.setuptools.package-data]
-"rvcircuit_studio.qutepart" = ["syntax/data/**/*"]
+"rvcircuit_studio" = [
+    "qutepart/**/*",
+    "icons/**/*",
+    "font/*",
+    "snippets.json",
+]

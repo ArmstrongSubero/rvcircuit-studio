@@ -35,16 +35,10 @@ try:
 except ImportError:
     HAS_QSERIALPORT = False
 
-try:
-    from qutepart import Qutepart
-    from qutepart.sideareas import *
-    from qutepart.sideareas import MarkArea
-    from qutepart.syntax import SyntaxManager
-except ImportError:
-    from .qutepart import Qutepart
-    from .qutepart.sideareas import *
-    from .qutepart.sideareas import MarkArea
-    from .qutepart.syntax import SyntaxManager
+from qutepart import Qutepart
+from qutepart.sideareas import *
+from qutepart.sideareas import MarkArea
+from qutepart.syntax import SyntaxManager
 
 logging.basicConfig(level=logging.WARNING)
 _logger = logging.getLogger('qutepart')

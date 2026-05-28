@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os, sys
+_pkg_dir = os.path.dirname(os.path.abspath(__file__))
+if _pkg_dir not in sys.path:
+    sys.path.insert(0, _pkg_dir)
+
 from .app import main
 
-__version__ = "0.1.0"
+__version__ = "0.1.5"
 __all__ = ["main"]

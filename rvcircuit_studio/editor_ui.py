@@ -34,7 +34,7 @@ class CodeEditorWindow(Qutepart):
 
         try:
             import json as _j
-            _p = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "circuit_studio_config.json")
+            _p = os.path.join(os.path.dirname(__file__), "data", "circuit_studio_config.json")
             self.zoom_level = int(_j.load(open(_p)).get("editor", {}).get("font_size", 10)) if os.path.exists(_p) else 10
         except Exception:
             self.zoom_level = 10
@@ -93,7 +93,7 @@ class CodeEditorWindow(Qutepart):
     def _save_font_size(self):
         try:
             import json as _j
-            _p = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "circuit_studio_config.json")
+            _p = os.path.join(os.path.dirname(__file__), "data", "circuit_studio_config.json")
             os.makedirs(os.path.dirname(_p), exist_ok=True)
             cfg = _j.load(open(_p)) if os.path.exists(_p) else {}
             cfg.setdefault("editor", {})["font_size"] = self.zoom_level

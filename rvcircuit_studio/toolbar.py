@@ -14,7 +14,7 @@
 
 from .common import *
 
-_IDE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_IDE_ROOT = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
 
 def _icon(name):
     """Load icon from icons/ directory, preferring SVG over PNG."""
@@ -289,7 +289,7 @@ class ToolbarManager:
         sub.setStyleSheet(f"font-size:12px;color:{CS_SUCCESS};font-family:'JetBrains Mono';")
         layout.addWidget(sub)
 
-        ver = QLabel("v0.1.0")
+        ver = QLabel("v0.1.4")
         ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
         ver.setStyleSheet(f"font-size:11px;color:{CS_TEXT_MUTED};")
         layout.addWidget(ver)

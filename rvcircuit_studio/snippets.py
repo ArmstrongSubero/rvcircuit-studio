@@ -18,7 +18,9 @@ from .common import *
 class SnippetManager:
     active_instance = None
 
-    def __init__(self, parent_widget, editor_widget, snippet_filename="snippets.json"):
+    def __init__(self, parent_widget, editor_widget, snippet_filename=None):
+        if snippet_filename is None:
+            snippet_filename = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snippets.json")
         if SnippetManager.active_instance:
             prev_layout = SnippetManager.active_instance.container.layout()
             for i in reversed(range(prev_layout.count())):

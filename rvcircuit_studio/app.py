@@ -23,7 +23,7 @@ from .common import *
 from .main_window import CircuitStudioEditor
 from .utils import _fixSysPath
 
-IDE_ROOT  = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+IDE_ROOT = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR  = os.path.join(IDE_ROOT, "data")
 CONFIG_FILE = os.path.join(DATA_DIR, "circuit_studio_config.json")
 STATE_FILE  = os.path.join(DATA_DIR, "circuit_studio_state.json")
