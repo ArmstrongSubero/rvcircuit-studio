@@ -1,68 +1,62 @@
 # RV Circuit Studio
 
-A native desktop CircuitPython IDE. Built with PySide6.
+Desktop CircuitPython IDE. Replaces Mu.
 
-**Mu is gone. This is what replaces it.**
+Offline, no accounts, no cloud. Runs from a flash drive. Ideal for environments where there is spotty internet access or data privacy is needed. Your code stays on your machine. No login, no telemetry, no "sync to cloud", no latency or 3rd party servers just you and your board! 
 
-RV Circuit Studio is a fully offline, distributable desktop IDE for CircuitPython — the kind of tool educators have been asking for since Mu was sunsetted. No browser required. No internet required. Copy it to a flash drive and hand it to a classroom.
+WE WILL NEVER GATHER OR COLLECT ANY OF YOUR DATA! ALL OPEN SOURCE!! PRIVACY FIRST!
 
-## Features
+## What it does
 
-- **Code editor** with syntax highlighting, line numbers, code folding (qutepart)
-- **Auto-detect CircuitPython boards** — plug in a board, it shows up
-- **Save to board** — one click saves `code.py` to the CIRCUITPY drive and auto-reloads
-- **Serial REPL** with ANSI color support, Ctrl+C interrupt, Ctrl+D soft reboot
-- **Source-level debugger** — step, continue, breakpoints, watch expressions, frame history
-- **Serial plotter** — real-time graphing of serial data (pyqtgraph)
-- **Library manager** — browse and install CircuitPython libraries from the Adafruit bundle
-- **File explorer** with project workspace management
-- **Snippet manager** — insert common CircuitPython patterns
-- **Find & replace** across files
-- **Dark theme** — GitHub-style palette, easy on the eyes
+Code editor with syntax highlighting and code folding that auto detects CircuitPython boards. Saves code.py to the CIRCUITPY drive and the board reloads automatically, there is a serial REPL with color support. Source-level debugger with breakpoints and watch expressions. Real-time serial plotter with library manager for Adafruit bundles. Snippet manager with common CircuitPython patterns.
 
 ## Install
+
+### Windows
+
+Download the standalone portable exe from [Releases](https://github.com/ArmstrongSubero/rvcircuit-studio/releases) No install or admin priviledges required!
+
+Or via pip:
+
+```
+pip install rvcircuit-studio
+rvcircuit-studio
+```
+
+### macOS
 
 ```
 pip install rvcircuit-studio
 ```
 
-Then run:
+If `rvcircuit-studio` isn't found after install, add the bin directory to your PATH:
 
 ```
+echo 'export PATH="$HOME/.pyenv/versions/3.12.3/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
 rvcircuit-studio
 ```
 
-### Requirements
+### Linux
 
-- Python 3.10+
-- A CircuitPython board (tested with RP2040, ESP32-S3, nRF52840)
-
-## Screenshots
-
-*Coming soon*
-
-## For Educators
-
-RV Circuit Studio is designed for classroom deployment:
-
-- **Fully offline** — no accounts, no cloud, no telemetry
-- **Single command install** — `pip install rvcircuit-studio`
-- **Cross-platform** — Windows, macOS, Linux
-- **Distributable** — bundle with PyInstaller for a standalone `.exe`
-
-## Development
-
-```bash
-git clone https://github.com/ArmstrongSubero/rvcircuit-studio.git
-cd rvcircuit-studio
-pip install -e .
+```
+pip install rvcircuit-studio
 rvcircuit-studio
 ```
+
+## Requirements
+
+Python 3.10+. Tested with Pico and Pico 2. Recommend Pico 2. Baochip and Dabao Board support coming soon. 
+However should work with any CircuitPython board. 
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+Apache 2.0
+
+## Contributing
+
+Bug reports are welcome open an issue if it's a big bug. Unfortunately due to the prevalance of AI pull requests I won't be accepting them sorry, but reach out to me via email armstrongsubero@gmail.com, I'm very open to suggestions and improvement. 
 
 ## Author
 
-Armstrong Subero — [rvembedded.com](https://rvembedded.com)
+Armstrong Subero @ [rvembedded.com](https://rvembedded.com)
