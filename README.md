@@ -6,6 +6,8 @@ Desktop CircuitPython IDE. Replaces Mu.
 <img width="1919" height="1029" alt="image" src="https://github.com/user-attachments/assets/a4d13c4a-f33b-48d8-90bd-0a6a2570f0df" />
 
 
+
+
 Offline, no accounts, no cloud. Runs from a flash drive. Ideal for environments where there is spotty internet access or data privacy is needed. Your code stays on your machine. No login, no telemetry, no "sync to cloud", no latency or 3rd party servers just you and your board! 
 
 WE WILL NEVER GATHER OR COLLECT ANY OF YOUR DATA! ALL OPEN SOURCE!! PRIVACY FIRST!
