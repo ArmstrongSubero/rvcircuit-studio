@@ -20,8 +20,7 @@ available under the LGPL-2.1, in accordance with the license.
 
 In accordance with the LGPL, the source of the qutepart/ component
 (including Rovari's modifications) is made available, and users may
-modify and relink this component. See: <your public repo URL for the
-qutepart fork>
+modify and relink this component.
 
 ================================================================================
 Kate syntax highlighting definitions (qutepart/syntax/data/xml/)
