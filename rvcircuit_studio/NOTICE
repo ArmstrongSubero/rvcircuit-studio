@@ -1,0 +1,43 @@
+Rovari Studio
+Copyright (C) 2025-2026 Armstrong Subero
+
+This product includes software derived from Qutepart, a code editor
+component for Qt.
+
+================================================================================
+Qutepart
+================================================================================
+Copyright (C) 2011-2018 Andrei Kopats (hlamer)
+Original project: https://github.com/andreikop/qutepart
+
+Qutepart is licensed under the GNU Lesser General Public License,
+version 2.1 (LGPL-2.1). See the LICENSE.qutepart file for the full text.
+
+The qutepart/ directory of this project contains Qutepart together with
+modifications made for Rovari Studio (including a port to PySide6 and
+editor integration changes). Those modifications are likewise made
+available under the LGPL-2.1, in accordance with the license.
+
+In accordance with the LGPL, the source of the qutepart/ component
+(including Rovari's modifications) is made available, and users may
+modify and relink this component. See: <your public repo URL for the
+qutepart fork>
+
+================================================================================
+Kate syntax highlighting definitions (qutepart/syntax/data/xml/)
+================================================================================
+The XML syntax-highlighting definition files originate from the Kate
+editor project (KDE) and KSyntaxHighlighting. Each XML file declares its
+own license in its <language ... license="..."> attribute. Licenses present
+in this distribution include: LGPL (various versions), GPL (v2/v3), MIT,
+BSD, Artistic, WTFPL, FDL, zlib/libpng, CC0, and Public Domain.
+
+The individual license declared inside each XML file governs that file.
+These files are used as data (syntax definitions) loaded at runtime.
+
+================================================================================
+Breeze icon theme (qutepart/icons/)
+================================================================================
+Copyright (C) 2014 Uri Herrera <uri_herrera@nitrux.in> and others.
+Licensed under the LGPL. See qutepart/icons/BREEZE-ICON-LICENSE for the
+full text.
