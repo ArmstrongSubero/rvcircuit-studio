@@ -34,7 +34,7 @@ class CodeEditorWindow(Qutepart):
 
         try:
             import json as _j
-            _p = os.path.join(os.path.dirname(__file__), "data", "circuit_studio_config.json")
+            _p = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "circuit_studio_config.json")
             self.zoom_level = int(_j.load(open(_p)).get("editor", {}).get("font_size", 10)) if os.path.exists(_p) else 10
         except Exception:
             self.zoom_level = 10
@@ -53,6 +53,25 @@ class CodeEditorWindow(Qutepart):
         self.zoom_out_action.setShortcut(QKeySequence("Ctrl+-"))
         self.zoom_out_action.triggered.connect(self.zoom_out)
         self.addAction(self.zoom_out_action)
+
+        # Toggle comment: Ctrl+/ (Cmd+/ on macOS). QKeySequence maps
+        # the "Ctrl" portable modifier to Cmd on macOS automatically.
+        self.comment_action = QAction("Toggle Comment", self)
+        self.comment_action.setShortcut(QKeySequence("Ctrl+/"))
+        self.comment_action.triggered.connect(self.toggle_block_comment)
+        self.addAction(self.comment_action)
+
+        # Increase indent: Ctrl+] (Cmd+] on macOS)
+        self.indent_action = QAction("Indent", self)
+        self.indent_action.setShortcut(QKeySequence("Ctrl+]"))
+        self.indent_action.triggered.connect(self.increase_indent)
+        self.addAction(self.indent_action)
+
+        # Decrease indent: Ctrl+[ (Cmd+[ on macOS)
+        self.dedent_action = QAction("Unindent", self)
+        self.dedent_action.setShortcut(QKeySequence("Ctrl+["))
+        self.dedent_action.triggered.connect(self.decrease_indent)
+        self.addAction(self.dedent_action)
 
         self.ctrl_pressed = False
         
@@ -93,7 +112,7 @@ class CodeEditorWindow(Qutepart):
     def _save_font_size(self):
         try:
             import json as _j
-            _p = os.path.join(os.path.dirname(__file__), "data", "circuit_studio_config.json")
+            _p = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "circuit_studio_config.json")
             os.makedirs(os.path.dirname(_p), exist_ok=True)
             cfg = _j.load(open(_p)) if os.path.exists(_p) else {}
             cfg.setdefault("editor", {})["font_size"] = self.zoom_level
@@ -178,21 +197,73 @@ class CodeEditorWindow(Qutepart):
     def toggle_block_comment(self):
         cursor = self.textCursor()
 
+        # Expand to whole lines covering the selection (or the current line).
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+        had_selection = cursor.hasSelection()
+
+        cursor.setPosition(start)
+        cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+
+        # Qt uses U+2029 (paragraph separator) between lines in selectedText().
+        lines = cursor.selectedText().split('\u2029')
+
+        # Only consider non-blank lines when deciding toggle direction.
+        code_lines = [ln for ln in lines if ln.strip()]
+        all_commented = bool(code_lines) and all(
+            ln.lstrip().startswith("#") for ln in code_lines
+        )
+
+        new_lines = []
+        for ln in lines:
+            if all_commented:
+                # Remove the first "#" after any leading whitespace.
+                indent = ln[:len(ln) - len(ln.lstrip())]
+                body = ln[len(indent):]
+                if body.startswith("# "):
+                    body = body[2:]
+                elif body.startswith("#"):
+                    body = body[1:]
+                new_lines.append(indent + body)
+            else:
+                if ln.strip():
+                    indent = ln[:len(ln) - len(ln.lstrip())]
+                    new_lines.append(indent + "# " + ln[len(indent):])
+                else:
+                    new_lines.append(ln)  # leave blank lines untouched
+
+        cursor.beginEditBlock()
+        cursor.insertText('\n'.join(new_lines))
+        cursor.endEditBlock()
+
+        # Reselect the affected block so repeated presses keep working.
+        if had_selection:
+            new_end = cursor.position()
+            cursor.setPosition(new_end - len('\n'.join(new_lines)))
+            cursor.setPosition(new_end, QTextCursor.MoveMode.KeepAnchor)
+            self.setTextCursor(cursor)
+
+    def increase_indent(self):
+        """Ctrl+] : indent the current line or selection one level."""
+        cursor = self.textCursor()
         if not cursor.hasSelection():
             cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
-            cursor.movePosition(QTextCursor.MoveOperation.EndOfLine, QTextCursor.MoveMode.KeepAnchor)
-            
-        selected_text = cursor.selectedText()
-        lines = selected_text.split('\u2029')
+            cursor.movePosition(QTextCursor.MoveOperation.EndOfLine,
+                                QTextCursor.MoveMode.KeepAnchor)
+            self.setTextCursor(cursor)
+        self._indenter.onChangeSelectedBlocksIndent(increase=True)
 
-        all_commented = all(line.strip().startswith("//") for line in lines)
-
-        if all_commented:
-            uncommented_lines = [line[2:] if line.startswith("//") else line for line in lines]
-            cursor.insertText('\n'.join(uncommented_lines))
-        else:
-            commented_lines = ["//"+line for line in lines]
-            cursor.insertText('\n'.join(commented_lines))
+    def decrease_indent(self):
+        """Ctrl+[ : unindent the current line or selection one level."""
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
+            cursor.movePosition(QTextCursor.MoveOperation.EndOfLine,
+                                QTextCursor.MoveMode.KeepAnchor)
+            self.setTextCursor(cursor)
+        self._indenter.onChangeSelectedBlocksIndent(increase=False)
 
 class EditorWidget(QWidget):
     
