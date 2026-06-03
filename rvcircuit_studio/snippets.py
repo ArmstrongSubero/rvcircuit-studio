@@ -49,7 +49,10 @@ class SnippetManager:
         snippet_code = item.data(0, Qt.UserRole)
         if not snippet_code:
             return
-        current_editor = self.editor.currentWidget().qpart
+        current_widget = self.editor.currentWidget()
+        if current_widget is None or not hasattr(current_widget, "qpart"):
+            return  # no editor tab open to insert into
+        current_editor = current_widget.qpart
         cursor = current_editor.textCursor()
 
         block = cursor.block()

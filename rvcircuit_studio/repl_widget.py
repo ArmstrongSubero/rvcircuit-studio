@@ -37,6 +37,51 @@ _SGR_FG = {
 _DEFAULT_FG = CS_TEXT
 _DEFAULT_BG = CS_BG_DEEP
 
+
+def _decode_keep_incomplete(buf: bytes):
+    """Decode as much valid UTF-8 as possible from buf. Returns (text, rest)
+    where rest is any trailing bytes that form an incomplete multibyte
+    character and should be carried into the next read. Truly invalid bytes
+    (not just incomplete) are replaced so we never get permanently stuck."""
+    try:
+        return buf.decode("utf-8"), b""
+    except UnicodeDecodeError as e:
+        # If the error is at the very end, it's an incomplete trailing char:
+        # decode the good prefix and keep the tail.
+        if e.end >= len(buf) and e.start < len(buf):
+            good = buf[:e.start].decode("utf-8", errors="replace")
+            return good, buf[e.start:]
+        # Otherwise it's genuinely bad data mid-stream: replace and flush.
+        return buf.decode("utf-8", errors="replace"), b""
+
+
+def _resolve_mono_font(size: int) -> QFont:
+    """Return a monospace QFont using whichever family is actually installed,
+    so Qt doesn't emit the slow 'missing font family' alias-lookup warning.
+    Tries a few common monospace names in order, then falls back to the system
+    fixed-pitch font."""
+    from PySide6.QtGui import QFontDatabase
+    try:
+        available = set(QFontDatabase.families())
+    except Exception:
+        available = set()
+    for name in ("JetBrains Mono NL", "JetBrains Mono", "Cascadia Mono",
+                 "Consolas", "DejaVu Sans Mono", "Menlo", "Courier New"):
+        if name in available:
+            f = QFont(name, size)
+            f.setStyleHint(QFont.StyleHint.Monospace)
+            return f
+    # Last resort: ask Qt for its standard fixed-pitch font.
+    try:
+        f = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        f.setPointSize(size)
+        return f
+    except Exception:
+        f = QFont()
+        f.setStyleHint(QFont.StyleHint.Monospace)
+        f.setPointSize(size)
+        return f
+
 class REPLWidget(QTextEdit):
     data_received = Signal(str)
 
@@ -45,9 +90,11 @@ class REPLWidget(QTextEdit):
         self.setReadOnly(False)
         self.setAcceptRichText(False)
         self.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        # Cap scrollback so a board streaming output for hours can't grow the
+        # document until the editor slows to a crawl. Old lines roll off the top.
+        self.document().setMaximumBlockCount(5000)
 
-        font = QFont("JetBrains Mono", 10)
-        font.setStyleHint(QFont.StyleHint.Monospace)
+        font = _resolve_mono_font(10)
         self.setFont(font)
 
         palette = self.palette()
@@ -64,12 +111,13 @@ class REPLWidget(QTextEdit):
         self._poll_timer.timeout.connect(self._poll_serial)
 
         self._utf8_buf   = b""
+        self._pending_cr = False
         self._ansi_re    = re.compile(r'\x1b\[([0-9;]*)([A-Za-z])')
         self._cur_fg     = _DEFAULT_FG
         self._cur_bold   = False
         self._paste_mode = False
 
-        self._append_system("RV Circuit Studio — CircuitPython REPL")
+        self._append_system("RV Circuit Studio - CircuitPython REPL")
         self._append_system("Connect a CircuitPython board to get started.")
 
     def connect(self, port: str, baud: int = 115200):
@@ -171,12 +219,27 @@ class REPLWidget(QTextEdit):
             if waiting > 0:
                 raw = self._serial.read(waiting)
                 self._utf8_buf += raw
-                try:
-                    text = self._utf8_buf.decode('utf-8')
-                    self._utf8_buf = b""
-                except UnicodeDecodeError:
-                    text = self._utf8_buf.decode('utf-8', errors='replace')
-                    self._utf8_buf = b""
+                # Decode as much as possible; if the chunk ends mid-multibyte
+                # character, keep the incomplete tail in the buffer for the next
+                # poll instead of corrupting it with replacement chars.
+                text, self._utf8_buf = _decode_keep_incomplete(self._utf8_buf)
+                if not text:
+                    return
+                # CircuitPython ends lines with \r\n. A poll boundary can land
+                # between the \r and \n, and a lone \r reads as its own line
+                # break, producing a stray blank line. Collapse \r\n to \n, turn
+                # any lone \r into \n, but hold a trailing \r in case its \n
+                # its \n arrives in the next chunk.
+                pending_cr = getattr(self, "_pending_cr", False)
+                if pending_cr:
+                    text = "\r" + text
+                    self._pending_cr = False
+                if text.endswith("\r"):
+                    self._pending_cr = True
+                    text = text[:-1]
+                text = text.replace("\r\n", "\n").replace("\r", "\n")
+                if not text:
+                    return
                 self._process_vt100(text)
                 self.data_received.emit(text)
         except Exception as e:

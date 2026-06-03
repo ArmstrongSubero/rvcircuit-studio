@@ -15,6 +15,7 @@
 import os
 import sys
 import platform
+import threading as _threading
 
 from .common import QTimer, Signal, Qt
 from PySide6.QtCore import QObject
@@ -42,16 +43,56 @@ def detect_circuitpy():
     return None
 
 def _detect_windows():
-    """Enumerate drive letters A-Z, check volume name via ctypes."""
+    """Enumerate mounted drive letters and check each volume name via ctypes.
+    Uses the logical-drive bitmask to skip absent letters and guards each probe
+    so one flaky drive can't hang or abort the scan. Drive type is not filtered;
+    boards vary (removable or fixed) and only the volume name is reliable."""
     import ctypes
+    from ctypes import wintypes
     kernel32 = ctypes.windll.kernel32
+
+    # Declare signatures so ctypes marshals args/returns correctly.
+    try:
+        kernel32.GetLogicalDrives.restype = wintypes.DWORD
+        kernel32.GetVolumeInformationW.argtypes = [
+            wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.DWORD), wintypes.LPWSTR, wintypes.DWORD,
+        ]
+        kernel32.GetVolumeInformationW.restype = wintypes.BOOL
+    except Exception:
+        pass
+
+    try:
+        drives_mask = kernel32.GetLogicalDrives()
+    except Exception:
+        drives_mask = 0  # 0 => probe all letters below
+
     buf = ctypes.create_unicode_buffer(1024)
-    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+    for i, letter in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZ"):
+        if drives_mask and not (drives_mask & (1 << i)):
+            continue  # letter not mounted
         drive = f"{letter}:\\"
-        result = kernel32.GetVolumeInformationW(drive, buf, 1024,
-                                                None, None, None, None, 0)
-        if result and buf.value == "CIRCUITPY":
-            return drive
+        try:
+            result = kernel32.GetVolumeInformationW(drive, buf, 1024,
+                                                    None, None, None, None, 0)
+            if result and buf.value == "CIRCUITPY":
+                return drive
+        except Exception:
+            # A single bad drive must never abort the scan.
+            continue
+
+    # If the masked scan found nothing, probe every letter unconditionally.
+    if drives_mask:
+        for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+            drive = f"{letter}:\\"
+            try:
+                result = kernel32.GetVolumeInformationW(drive, buf, 1024,
+                                                        None, None, None, None, 0)
+                if result and buf.value == "CIRCUITPY":
+                    return drive
+            except Exception:
+                continue
     return None
 
 def _detect_macos():
@@ -181,16 +222,20 @@ class BoardWatcher(QObject):
     board_connected    = Signal(str, str)   # drive_path, port
     board_disconnected = Signal()
     board_status_changed = Signal(str)      # BoardStatus string
+    _poll_result       = Signal(object, object)  # internal: drive, port from worker
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._drive_path  = None
         self._repl_port   = None
         self._status      = BoardStatus.DISCONNECTED
+        self._poll_busy   = False   # guard: don't overlap polls
 
         self._timer = QTimer(self)
         self._timer.setInterval(2000)
         self._timer.timeout.connect(self._poll)
+        # Worker threads emit _poll_result; Qt queues it onto the UI thread.
+        self._poll_result.connect(self._apply_poll)
 
     def start(self):
         self._timer.start()
@@ -211,9 +256,27 @@ class BoardWatcher(QObject):
         return self._status
 
     def _poll(self):
-        drive = detect_circuitpy()
-        port  = find_repl_port() if drive else None
+        # Detection (drive + port enumeration) can block for a second or more
+        # when a drive or port is flaky, so run it off the UI thread and return
+        # the result via a queued signal. _poll_busy prevents overlapping scans.
+        if self._poll_busy:
+            return
+        self._poll_busy = True
+        _threading.Thread(target=self._poll_worker, daemon=True).start()
 
+    def _poll_worker(self):
+        try:
+            drive = detect_circuitpy()
+            port  = find_repl_port() if drive else None
+        except Exception:
+            drive, port = None, None
+        finally:
+            self._poll_busy = False
+        # Queued signal marshals to the UI thread; a QTimer started from a
+        # worker thread would not fire.
+        self._poll_result.emit(drive, port)
+
+    def _apply_poll(self, drive, port):
         if drive and port:
             new_status = BoardStatus.CONNECTED
         elif drive:
@@ -287,7 +350,6 @@ def read_boot_out(drive_path: str) -> dict:
 
 import urllib.request as _urllib_request
 import json as _json
-import threading as _threading
 
 CP_RELEASES_API = "https://api.github.com/repos/adafruit/circuitpython/releases/latest"
 CP_DOWNLOAD_PAGE = "https://circuitpython.org/board/{board_id}"
@@ -318,13 +380,13 @@ def check_cp_version_async(board_version: str, board_id: str, callback):
     """
     In a background thread, fetch the latest CP release and call
     callback(board_version, latest_version, download_url) on completion.
-    callback is always called on a worker thread — caller must use a Signal
+    callback is always called on a worker thread - caller must use a Signal
     to marshal back to the Qt main thread.
     """
     def worker():
         latest = _fetch_latest_cp_version()
         if not latest:
-            return  # network unavailable — don't nag
+            return  # network unavailable - don't nag
         board_t  = _version_tuple(board_version)
         latest_t = _version_tuple(latest)
         if board_t < latest_t:

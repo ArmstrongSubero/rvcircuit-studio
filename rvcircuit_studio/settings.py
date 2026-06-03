@@ -34,11 +34,11 @@ def _save_config(config):
         pass
 
 class SettingsDialog(QDialog):
-    """Circuit Studio Settings — Editor, Workspace, Board."""
+    """Circuit Studio Settings - Editor, Workspace, Board."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Circuit Studio — Settings")
+        self.setWindowTitle("Circuit Studio - Settings")
         self.setMinimumSize(520, 420)
         self.config = _load_config()
         self._build_ui()
@@ -143,7 +143,7 @@ class SettingsDialog(QDialog):
         form.addRow("", self.auto_save_check)
 
         info = QLabel(
-            "CircuitPython is interpreted — no compiler needed.\n"
+            "CircuitPython is interpreted - no compiler needed.\n"
             "Circuit Studio saves your .py file directly to the\n"
             "CIRCUITPY drive and the board auto-reloads."
         )

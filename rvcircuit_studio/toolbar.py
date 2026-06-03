@@ -69,7 +69,7 @@ class ToolbarManager:
         self.toggle_repl_action.setCheckable(True)
 
         self.run_action = QAction(_icon("run.png"), "Run (Save to Board)", self.toolbar)
-        self.run_action.setToolTip("Save code.py to CIRCUITPY drive — board auto-reloads")
+        self.run_action.setToolTip("Save code.py to CIRCUITPY drive - board auto-reloads")
 
         self.format_action = QAction("{ }", self.toolbar)
         self.format_action.setToolTip("Format code with Black")
@@ -90,7 +90,7 @@ class ToolbarManager:
         self.about_action        = QAction(_icon("rovari_logo.svg"),  "About",           self.toolbar)
 
     def _create_serial_widgets(self):
-        """Port + baud dropdowns — same as RV Circuit Studio."""
+        """Port + baud dropdowns - same as RV Circuit Studio."""
         self.port_label = QLabel(" Port ")
         self.port_label.setStyleSheet(
             f"font-size:9px;color:{CS_TEXT_MUTED};font-family:'JetBrains Mono';"
@@ -289,7 +289,8 @@ class ToolbarManager:
         sub.setStyleSheet(f"font-size:12px;color:{CS_SUCCESS};font-family:'JetBrains Mono';")
         layout.addWidget(sub)
 
-        ver = QLabel("v0.1.4")
+        from ._version import __version__
+        ver = QLabel(f"v{__version__}")
         ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
         ver.setStyleSheet(f"font-size:11px;color:{CS_TEXT_MUTED};")
         layout.addWidget(ver)

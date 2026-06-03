@@ -35,7 +35,11 @@ class CodeEditorWindow(Qutepart):
         try:
             import json as _j
             _p = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "circuit_studio_config.json")
-            self.zoom_level = int(_j.load(open(_p)).get("editor", {}).get("font_size", 10)) if os.path.exists(_p) else 10
+            if os.path.exists(_p):
+                with open(_p) as _f:
+                    self.zoom_level = int(_j.load(_f).get("editor", {}).get("font_size", 10))
+            else:
+                self.zoom_level = 10
         except Exception:
             self.zoom_level = 10
         self.set_zoom_font()
@@ -114,9 +118,14 @@ class CodeEditorWindow(Qutepart):
             import json as _j
             _p = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "circuit_studio_config.json")
             os.makedirs(os.path.dirname(_p), exist_ok=True)
-            cfg = _j.load(open(_p)) if os.path.exists(_p) else {}
+            if os.path.exists(_p):
+                with open(_p) as _f:
+                    cfg = _j.load(_f)
+            else:
+                cfg = {}
             cfg.setdefault("editor", {})["font_size"] = self.zoom_level
-            _j.dump(cfg, open(_p, "w"), indent=2)
+            with open(_p, "w") as _f:
+                _j.dump(cfg, _f, indent=2)
         except Exception:
             pass
 
@@ -285,6 +294,15 @@ class EditorWidget(QWidget):
         self.qpart.vimModeIndicationChanged.connect(self.onVimModeChanged)
         self.qpart.textChanged.connect(self.on_content_changed)
 
+        # Double-click-a-word highlights every occurrence (like Mu/VS Code).
+        # We own both the error highlight and the word highlight here, because
+        # qutepart's setExtraSelections replaces the whole list with one shared
+        # format. _error_sel holds the current red error line (or None); word
+        # matches are recomputed on selection change and rendered together.
+        self._error_sel = None          # (start, length) or None
+        self._word_match_re = None
+        self.qpart.selectionChanged.connect(self._on_selection_changed)
+
         self._modified = False 
         self.current_file = None
 
@@ -340,31 +358,73 @@ class EditorWidget(QWidget):
     def on_save(self):
         self._modified = False
 
-    def highlight_error_line(self, line_number: int):
-        """Highlight a line red (1-based) using qutepart's setExtraSelections.
-        qutepart expects (startAbsolutePosition, length) tuples and uses
-        _userExtraSelectionFormat for the highlight colour."""
+    def _on_selection_changed(self):
+        """When the user double-clicks (or selects) a single whole word,
+        highlight every occurrence of it. Clears when the selection is empty
+        or spans something that isn't a single identifier."""
+        import re as _re
         from PySide6.QtGui import QColor, QTextCharFormat
-        from PySide6.QtCore import Qt
+
+        cursor = self.qpart.textCursor()
+        sel = cursor.selectedText()
+
+        # Only react to a single-word selection (letters/digits/underscore).
+        if sel and _re.fullmatch(r"[A-Za-z_]\w*", sel):
+            self._word_match_re = _re.compile(r"\b" + _re.escape(sel) + r"\b")
+        else:
+            self._word_match_re = None
+        self._render_extra_selections()
+
+    def _render_extra_selections(self):
+        """Push the combined highlight set (word matches + error line) to
+        qutepart. qutepart applies one shared format to all entries, so when
+        word matches are present we use the word colour; otherwise the error
+        colour is used for the error line."""
+        from PySide6.QtGui import QColor, QTextCharFormat
+
+        sels = []
+        if self._word_match_re is not None:
+            text = self.qpart.toPlainText()
+            for m in self._word_match_re.finditer(text):
+                sels.append((m.start(), m.end() - m.start()))
+
+        if sels:
+            fmt = QTextCharFormat()
+            fmt.setBackground(QColor("#3a4a2a"))   # subtle olive, like Mu
+            self.qpart._userExtraSelectionFormat = fmt
+            # If an error line exists, keep it visible too (same format; the
+            # error line is rarely active while word-hunting).
+            if self._error_sel is not None:
+                sels.append(self._error_sel)
+            self.qpart.setExtraSelections(sels)
+        elif self._error_sel is not None:
+            fmt = QTextCharFormat()
+            fmt.setBackground(QColor("#3d1a1a"))
+            fmt.setForeground(QColor("#ff7b72"))
+            self.qpart._userExtraSelectionFormat = fmt
+            self.qpart.setExtraSelections([self._error_sel])
+        else:
+            self.qpart.setExtraSelections([])
+
+    def highlight_error_line(self, line_number: int):
+        """Highlight a line red. Coexists with word highlighting."""
         doc = self.qpart.document()
         block = doc.findBlockByLineNumber(line_number - 1)
         if not block.isValid():
             return
         start = block.position()
         length = max(block.length() - 1, 1)
-        fmt = QTextCharFormat()
-        fmt.setBackground(QColor("#3d1a1a"))
-        fmt.setForeground(QColor("#ff7b72"))
-        self.qpart._userExtraSelectionFormat = fmt
-        self.qpart.setExtraSelections([(start, length)])
+        self._error_sel = (start, length)
+        self._render_extra_selections()
         cursor = self.qpart.textCursor()
         cursor.setPosition(start)
         self.qpart.setTextCursor(cursor)
         self.qpart.ensureCursorVisible()
 
     def clear_error_highlight(self):
-        """Remove any error highlighting."""
-        self.qpart.setExtraSelections([])
+        """Remove error highlighting (leaves any word highlight intact)."""
+        self._error_sel = None
+        self._render_extra_selections()
 
     def get_text(self):
         return self.qpart.toPlainText()
@@ -377,9 +437,14 @@ class EditorWidget(QWidget):
             self.saveFile()
 
     def saveFile(self):
-        with open(self.current_file, 'w',  encoding='utf-8') as file:
-            file.write(self.get_text())
-        self._modified = False  # Reset the modified flag
+        try:
+            with open(self.current_file, 'w', encoding='utf-8') as file:
+                file.write(self.get_text())
+            self._modified = False  # Reset the modified flag
+        except Exception:
+            # File may be gone or unwritable (e.g. board ejected mid-edit).
+            # Leave _modified set so a later manual save can still recover it.
+            pass
 
 class EditorTabWidget(QTabWidget):
     def __init__(self, parent=None):

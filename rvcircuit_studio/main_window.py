@@ -55,6 +55,12 @@ class CircuitStudioEditor(QWidget):
         └──────────┴─────────────────────────────┘
     """
 
+    # Emitted from the auto-install worker thread; Qt queues it onto the UI
+    # thread (QTimer.singleShot from a worker thread does NOT fire reliably).
+    _autoinstall_done = Signal(object, object)  # installed, skipped
+    # Emitted from the CP-version-check worker thread (same threading rule).
+    _cp_update_found = Signal(str, str, str)    # board_ver, latest_ver, url
+
     def __init__(self, window: QMainWindow, project_dir=None):
         super().__init__()
         self.window = window
@@ -62,6 +68,8 @@ class CircuitStudioEditor(QWidget):
         self._board_drive = None
         self._repl_port   = None
         self._repl_running = True  # assume code is running when connected
+        self._autoinstall_done.connect(self._on_autoinstall_done)
+        self._cp_update_found.connect(self._on_cp_update_found)
 
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
@@ -150,9 +158,13 @@ class CircuitStudioEditor(QWidget):
         self.debug_tab_btn = QPushButton("Debug")
         self.debug_tab_btn.setStyleSheet(_btn_style_inactive)
 
+        self.camera_tab_btn = QPushButton("Camera")
+        self.camera_tab_btn.setStyleSheet(_btn_style_inactive)
+
         tab_bar_layout.addWidget(self.repl_tab_btn)
         tab_bar_layout.addWidget(self.plotter_tab_btn)
         tab_bar_layout.addWidget(self.debug_tab_btn)
+        tab_bar_layout.addWidget(self.camera_tab_btn)
         tab_bar_layout.addStretch()
 
         _btn_style_clear = (
@@ -173,6 +185,9 @@ class CircuitStudioEditor(QWidget):
         self.bottom_stack.addWidget(self.repl_panel)      # index 0
         self.bottom_stack.addWidget(self.plotter_panel)   # index 1
         self.bottom_stack.addWidget(self.debugger_panel)  # index 2
+        from .camera_panel import CameraPanel
+        self.camera_panel = CameraPanel()
+        self.bottom_stack.addWidget(self.camera_panel)    # index 3
 
         bottom_layout.addWidget(tab_bar)
         bottom_layout.addWidget(self.bottom_stack)
@@ -187,6 +202,7 @@ class CircuitStudioEditor(QWidget):
         self.repl_tab_btn.clicked.connect(self._on_repl_tab_clicked)
         self.plotter_tab_btn.clicked.connect(lambda: self._switch_bottom_tab(1))
         self.debug_tab_btn.clicked.connect(self._on_debug_tab_clicked)
+        self.camera_tab_btn.clicked.connect(self._on_camera_tab_clicked)
 
         self.bottom_panel.setVisible(False)
 
@@ -203,6 +219,12 @@ class CircuitStudioEditor(QWidget):
         self.board_watcher.board_disconnected.connect(self._on_board_disconnected)
         self.board_watcher.board_status_changed.connect(self._on_board_status_changed)
         self.board_watcher.start()
+
+        # Global stop shortcut. Ctrl+C can't be used app-wide (it's Copy), so
+        # Ctrl+. sends Ctrl+C (0x03) to the board from any focused pane.
+        self._stop_shortcut = QShortcut(QKeySequence("Ctrl+."), self.window)
+        self._stop_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._stop_shortcut.activated.connect(self._global_interrupt)
 
         self.toolbar_manager.initial_port_scan()
         if project_dir:
@@ -271,30 +293,17 @@ class CircuitStudioEditor(QWidget):
                 f"Drive: {drive}  Port: {port}"
             )
         else:
-            status_msg = f"Board connected — Drive: {drive}  Port: {port}"
+            status_msg = f"Board connected - Drive: {drive}  Port: {port}"
         self._set_board_status_ui(BoardStatus.CONNECTED, drive, port)
         self.window.statusBar().showMessage(status_msg, 8000)
 
         if boot.get("version") and boot.get("board_id"):
-            def _on_update_found(board_ver, latest_ver, url,
-                                 _win=self.window, _bname=self._board_name):
-                def _show():
-                    reply = QMessageBox.question(
-                        _win,
-                        "CircuitPython Update Available",
-                        f"Your board is running CircuitPython {board_ver}.\n"
-                        f"The latest stable release is {latest_ver}.\n\n"
-                        f"Would you like to open the download page for\n"
-                        f"{_bname}?",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-                    )
-                    if reply == QMessageBox.StandardButton.Yes:
-                        from PySide6.QtGui import QDesktopServices
-                        from PySide6.QtCore import QUrl
-                        QDesktopServices.openUrl(QUrl(url))
-                QTimer.singleShot(0, _show)
+            # The callback fires on a worker thread; emit a signal so Qt
+            # marshals the dialog onto the UI thread (a QTimer from the worker
+            # thread would not fire reliably).
             check_cp_version_async(
-                boot["version"], boot.get("board_id", ""), _on_update_found
+                boot["version"], boot.get("board_id", ""),
+                lambda bv, lv, url: self._cp_update_found.emit(bv, lv, url)
             )
 
         self._pre_board_project_dir = self.current_project_directory
@@ -318,6 +327,23 @@ class CircuitStudioEditor(QWidget):
 
         self.debugger_panel.set_drive(drive)
         self.debugger_panel.set_repl(self.repl_panel)
+
+    def _on_cp_update_found(self, board_ver, latest_ver, url):
+        """Runs on the UI thread (via signal) when a newer CircuitPython is
+        available, so the dialog is created safely on the GUI thread."""
+        reply = QMessageBox.question(
+            self.window,
+            "CircuitPython Update Available",
+            f"Your board is running CircuitPython {board_ver}.\n"
+            f"The latest stable release is {latest_ver}.\n\n"
+            f"Would you like to open the download page for\n"
+            f"{getattr(self, '_board_name', '') or 'your board'}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl(url))
 
     def _on_board_disconnected(self):
         self._board_drive = None
@@ -349,6 +375,20 @@ class CircuitStudioEditor(QWidget):
         port  = self.board_watcher.repl_port  or ""
         self._set_board_status_ui(status, drive, port)
 
+    def _global_interrupt(self):
+        """Stop the running program from anywhere (Ctrl+.). Sends Ctrl+C to the
+        board and makes the REPL visible so the user sees it halt."""
+        if getattr(self.repl_panel, "is_connected", False):
+            self.repl_panel.send_interrupt()
+            self._repl_running = False
+            self._set_run_btn_state(running=False)
+            self.bottom_panel.setVisible(True)
+            self._switch_bottom_tab(0)
+            self.repl_panel.setFocus()
+            self.window.statusBar().showMessage("■ Sent Ctrl+C - stopped", 3000)
+        else:
+            self.window.statusBar().showMessage("No board connected to stop.", 3000)
+
     def run_on_board(self):
         """Run button toggle: if running → stop (Ctrl+C), if stopped → save and run."""
         if self._repl_running:
@@ -374,7 +414,7 @@ class CircuitStudioEditor(QWidget):
                 self._repl_running = True
                 self._set_run_btn_state(running=True)
                 self.window.statusBar().showMessage(
-                    f"▶ Running — saved to {drive}{filename}", 3000)
+                    f"▶ Running - saved to {drive}{filename}", 3000)
                 if self.repl_panel.is_connected:
                     self.repl_panel.send_soft_reboot()
             else:
@@ -403,7 +443,7 @@ class CircuitStudioEditor(QWidget):
             self.window.statusBar().showMessage(f"Format error: {e}", 4000)
 
     def stop_board(self):
-        """Legacy stop — now handled by run_on_board toggle."""
+        """Legacy stop - now handled by run_on_board toggle."""
         self.run_on_board()
 
     def _set_run_btn_state(self, running: bool):
@@ -422,8 +462,10 @@ class CircuitStudioEditor(QWidget):
                 w.setStyleSheet("background: #6c3fc4; border-radius: 4px; padding: 2px 4px;")
 
     def _on_repl_tab_clicked(self):
-        """REPL tab button: just switch back to REPL tab."""
+        """REPL tab button: switch to REPL and give it keyboard focus so keys
+        (including Ctrl+C) are routed to the board."""
         self._switch_bottom_tab(0)
+        self.repl_panel.setFocus()
 
     def _on_debug_tab_clicked(self):
         """Debug tab button: show debugger panel and pass drive/repl refs."""
@@ -432,6 +474,11 @@ class CircuitStudioEditor(QWidget):
         if self._board_drive:
             self.debugger_panel.set_drive(self._board_drive)
         self._switch_bottom_tab(2)
+
+    def _on_camera_tab_clicked(self):
+        """Camera tab button: show the live camera panel."""
+        self.bottom_panel.setVisible(True)
+        self._switch_bottom_tab(3)
 
     def _on_repl_clear(self):
         """Clear the REPL output."""
@@ -446,6 +493,7 @@ class CircuitStudioEditor(QWidget):
         self.repl_tab_btn.setStyleSheet(_active   if index == 0 else _inactive)
         self.plotter_tab_btn.setStyleSheet(_active if index == 1 else _inactive)
         self.debug_tab_btn.setStyleSheet(_active  if index == 2 else _inactive)
+        self.camera_tab_btn.setStyleSheet(_active if index == 3 else _inactive)
 
     def _update_repl_btn(self, connected: bool):
         """Update REPL tab button text to reflect connection state."""
@@ -481,9 +529,14 @@ class CircuitStudioEditor(QWidget):
         cp_version = getattr(self, '_cp_version', '9')
         if hasattr(self, '_board_name') and self._board_name:
             self.window.statusBar().showMessage(
-                f"Library Manager — targeting CircuitPython {cp_version} bundle", 4000
+                f"Library Manager - targeting CircuitPython {cp_version} bundle", 4000
             )
-        dlg = LibraryManagerDialog(drive, cp_version=cp_version, parent=self.window)
+        dlg = LibraryManagerDialog(
+            drive,
+            cp_version=cp_version,
+            project_dir=getattr(self, "current_project_directory", None),
+            parent=self.window,
+        )
         dlg.exec()
 
     def _build_plotter_panel(self):
@@ -554,6 +607,120 @@ class CircuitStudioEditor(QWidget):
             return widget.toPlainText()
         return None
 
+    def _check_missing_libraries(self, silent_if_none=True, saved_path=None):
+        """
+        Auto-detect: scan the current code for imports that aren't on the board
+        and offer to install them in one click, without opening the Library
+        Manager. Uses the already-downloaded bundle cache; if the bundle hasn't
+        been downloaded yet, this quietly does nothing.
+        """
+        from . import bundle_logic as bl
+        from . import library_manager as lm
+
+        drive = getattr(self, "_board_drive", None)
+
+        # If we know the saved file's path, only proceed when it's actually on
+        # the board. Normalise so D:\, D:, d:\ all compare equal on Windows.
+        if saved_path and drive:
+            try:
+                np = os.path.normcase(os.path.abspath(saved_path))
+                nd = os.path.normcase(os.path.abspath(drive))
+                if not np.startswith(nd):
+                    return
+            except Exception:
+                pass
+
+        if not drive:
+            return
+        lib_dir = os.path.join(drive, "lib")
+
+        code = self._get_current_editor_text()
+        if not code:
+            return
+
+        cp_major = getattr(self, "_cp_major", "9") or "9"
+        cached = lm.load_cached_bundle(cp_major)
+        if not cached:
+            return  # bundle not downloaded yet; nothing to check against
+        zip_path, index, manifest = cached
+
+        missing = bl.find_missing_libraries(code, lib_dir, index, manifest)
+        if not missing:
+            if not silent_if_none:
+                self.window.statusBar().showMessage(
+                    "All imported libraries are present on the board.", 3000
+                )
+            return
+
+        # Don't nag about the exact same set twice in a row.
+        sig = tuple(missing)
+        if getattr(self, "_last_missing_sig", None) == sig:
+            return
+        self._last_missing_sig = sig
+
+        # Expand to include dependencies for an accurate count/preview.
+        targets = bl.resolve_dependencies(manifest, missing) if manifest else missing
+        deps_only = [t for t in targets if t not in missing]
+
+        names = ", ".join(missing)
+        detail = f"Your code imports {len(missing)} librar" \
+                 f"{'y' if len(missing) == 1 else 'ies'} not on the board:\n\n  {names}"
+        if deps_only:
+            detail += "\n\nDependencies that will come along:\n  " + ", ".join(deps_only)
+        detail += "\n\nInstall now?"
+
+        reply = QMessageBox.question(
+            self.window, "Missing Libraries", detail,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Installing unzips files and writes them to the USB drive, which can
+        # take a noticeable moment for packages or a slow board. Do it on a
+        # worker thread so the IDE stays responsive, then hand results back via
+        # a queued signal (a QTimer started from a worker thread won't fire).
+        self.window.statusBar().showMessage("Installing libraries…", 0)
+
+        def _worker():
+            installed, skipped = lm.install_libraries(zip_path, index, targets, lib_dir)
+            self._autoinstall_done.emit(installed, skipped)
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_autoinstall_done(self, installed, skipped):
+        """Runs on the UI thread after a background auto-install finishes."""
+        if installed:
+            self._last_missing_sig = None  # they're present now; allow future checks
+            self.window.statusBar().showMessage(
+                f"Installed {len(installed)} librar"
+                f"{'y' if len(installed) == 1 else 'ies'} to the board - reloading…", 4000
+            )
+            # The previous run failed on a missing import; that error is now
+            # resolved, so clear the stale red highlight and reboot to re-run.
+            try:
+                self._traceback_buf = ''
+                for i in range(self.editor_tab_widget.count()):
+                    w = self.editor_tab_widget.widget(i)
+                    if hasattr(w, "clear_error_highlight"):
+                        w.clear_error_highlight()
+            except Exception:
+                pass
+            try:
+                if getattr(self.repl_panel, "is_connected", False):
+                    # Ctrl+D only reloads from the REPL prompt. If code is
+                    # running (e.g. a while True loop), interrupt first with
+                    # Ctrl+C, then reboot after the board reaches the prompt.
+                    self.repl_panel.send_interrupt()
+                    QTimer.singleShot(300, self.repl_panel.send_soft_reboot)
+            except Exception:
+                pass
+        if skipped:
+            self.window.statusBar().showMessage(
+                f"Could not install: {', '.join(skipped)}", 5000
+            )
+
     def _connect_editor_signals(self, editor: "EditorWidget", idx_getter):
         """Wire up modified-flag and dirty-tab-title for an editor."""
         def on_modified():
@@ -617,8 +784,11 @@ class CircuitStudioEditor(QWidget):
 
             if drive and current_path.startswith(drive):
                 self.window.statusBar().showMessage(
-                    f"✓ Saved to board — reloading…", 3000
+                    f"✓ Saved to board - reloading…", 3000
                 )
+            # Auto-detect runs after every save; it decides internally whether
+            # this file lives on the board before doing anything.
+            QTimer.singleShot(400, lambda p=current_path: self._check_missing_libraries(saved_path=p))
         except Exception as e:
             self.toolbar_manager.show_save_status(False)
             QMessageBox.critical(self.window, "Save Error", str(e))
@@ -674,6 +844,15 @@ class CircuitStudioEditor(QWidget):
         if widget and hasattr(widget, 'qpart'):
             self.debugger_panel.uninstall_gutter(widget.qpart)
         self.editor_tab_widget.removeTab(idx)
+        # removeTab does not destroy the widget. Without this, every closed tab
+        # leaks an EditorWidget whose autosave QTimer keeps firing forever.
+        if widget is not None:
+            try:
+                if hasattr(widget, 'autosave_timer'):
+                    widget.autosave_timer.stop()
+            except Exception:
+                pass
+            widget.deleteLater()
 
     def open_file_from_tree(self, index):
         source_idx = self.proxyModel.mapToSource(index)
@@ -814,7 +993,7 @@ class CircuitStudioEditor(QWidget):
                 self._open_project(new_path)
             elif hasattr(self, '_file_path') and self._file_path == path:
                 self._file_path = new_path
-                self.window.setWindowTitle(f"RV Circuit Studio — {new_name}")
+                self.window.setWindowTitle(f"RV Circuit Studio - {new_name}")
             self.window.statusBar().showMessage(f"Renamed {old_name} → {new_name}", 2000)
         except Exception as e:
             QMessageBox.critical(self.window, "Rename Error", str(e))
@@ -910,7 +1089,7 @@ class CircuitStudioEditor(QWidget):
             self.fileView.setRootIndex(proxy_idx)
             QTimer.singleShot(100, lambda: self._expand_project_node(path))
 
-        self.window.setWindowTitle(f"RV Circuit Studio — {os.path.basename(path)}")
+        self.window.setWindowTitle(f"RV Circuit Studio - {os.path.basename(path)}")
 
     def _expand_project_node(self, path: str):
         proj_src   = self.fileSystemModel.index(path)
@@ -970,4 +1149,3 @@ class CircuitStudioEditor(QWidget):
 
     def save_editor_state(self):
         pass  # Extend later to persist open tabs
-

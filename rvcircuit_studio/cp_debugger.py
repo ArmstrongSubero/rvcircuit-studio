@@ -113,7 +113,10 @@ def identify_steppable_lines(code: str) -> set:
     """
     try:
         tree = ast.parse(code)
-    except SyntaxError:
+    except (SyntaxError, ValueError, RecursionError):
+        # SyntaxError: incomplete/invalid code. ValueError: source with null
+        # bytes. RecursionError: pathologically nested code. Any of these just
+        # means "can't instrument", not a crash.
         return set()
     rows = set()
     _walk_steppable(tree, rows)
@@ -153,6 +156,10 @@ def _generate_debug_block(
 
     if not is_breakpoint:
         for expr in all_cbp:
+            # Same raw-injection concern as watches: only allow clean
+            # single-line expressions into the generated board code.
+            if not expr or "\n" in expr or "\r" in expr:
+                continue
             block += f"{indent}try:\n"
             block += f"{indent}    _ds.us({expr})\n"
             block += f"{indent}except:\n"
@@ -165,7 +172,12 @@ def _generate_debug_block(
     block += f'{inner}_ds.sh("{filename}", {line_num})\n'
 
     for expr in all_watches:
-        safe_key = expr.replace('"', '\\"')
+        # A watch expression is injected raw into generated source. A newline
+        # or stray backslash would corrupt the file that runs on the board, so
+        # skip anything that isn't a clean single-line expression.
+        if not expr or "\n" in expr or "\r" in expr:
+            continue
+        safe_key = expr.replace("\\", "\\\\").replace('"', '\\"')
         block += f"{inner}try:\n"
         block += f"{inner}    _ds.d[\"w\"][\"{safe_key}\"] = str({expr})\n"
         block += f"{inner}except Exception as _debug_e:\n"

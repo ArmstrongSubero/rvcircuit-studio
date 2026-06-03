@@ -54,8 +54,8 @@ class SerialPlotter(QWidget):
 
     Public API
     ----------
-    feed(text: str)   — called by main_window via data_received signal
-    clear()           — wipe all traces
+    feed(text: str)   - called by main_window via data_received signal
+    clear()           - wipe all traces
     """
 
     def __init__(self, parent=None):
@@ -139,7 +139,7 @@ class SerialPlotter(QWidget):
         )
 
         self._placeholder = pg.TextItem(
-            "Serial Plotter — no data yet.\n"
+            "Serial Plotter - no data yet.\n"
             "From your board: print(f\"{x},{y},{z}\")\n"
             "or labelled:     print(f\"temp={t},hum={h}\")",
             color=CS_TEXT_MUTED,
@@ -171,6 +171,10 @@ class SerialPlotter(QWidget):
         while "\n" in self._line_buf:
             line, self._line_buf = self._line_buf.split("\n", 1)
             self._process_line(line.strip().rstrip("\r"))
+        # Safety: if a stream never sends a newline, _line_buf would grow
+        # forever. Cap it so a runaway/binary stream can't exhaust memory.
+        if len(self._line_buf) > 65536:
+            self._line_buf = self._line_buf[-4096:]
 
     def clear(self):
         """Remove all traces and reset the plot."""
@@ -242,8 +246,13 @@ class SerialPlotter(QWidget):
         self._placeholder.setVisible(False)
 
         colour_idx = len(self._traces)
+        # Cap distinct traces so a stream with changing labels can't grow them
+        # without bound.
+        _MAX_TRACES = 32
         for name, val in values.items():
             if name not in self._traces:
+                if len(self._traces) >= _MAX_TRACES:
+                    continue  # too many distinct series; ignore further new names
                 col = _TRACE_COLOURS[colour_idx % len(_TRACE_COLOURS)]
                 colour_idx += 1
                 buf = collections.deque(maxlen=self._window)

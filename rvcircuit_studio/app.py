@@ -24,6 +24,10 @@ from .main_window import CircuitStudioEditor
 from .utils import _fixSysPath
 
 IDE_ROOT = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+
+# Set to the real registered family name once the bundled font loads at
+# startup. Other modules read this so they request a name Qt actually has.
+MONO_FONT_FAMILY = "JetBrains Mono NL"
 DATA_DIR  = os.path.join(IDE_ROOT, "data")
 CONFIG_FILE = os.path.join(DATA_DIR, "circuit_studio_config.json")
 STATE_FILE  = os.path.join(DATA_DIR, "circuit_studio_state.json")
@@ -59,7 +63,7 @@ def _load_or_setup(app):
     if not workspace or not os.path.isdir(workspace):
         workspace = QFileDialog.getExistingDirectory(
             None,
-            "Select Workspace — RV Circuit Studio will save your CircuitPython projects here"
+            "Select Workspace - RV Circuit Studio will save your CircuitPython projects here"
         )
         if not workspace:
             workspace = os.path.join(os.path.expanduser("~"), "CircuitStudioWorkspace")
@@ -120,20 +124,21 @@ def _create_splash():
     grad.setColorAt(1.0, QColor("#238636"))
     p.fillRect(0, 0, W, 3, grad)
 
-    title_font = QFont("JetBrains Mono", 28, QFont.Weight.Bold)
+    title_font = QFont(MONO_FONT_FAMILY, 28, QFont.Weight.Bold)
     p.setFont(title_font)
     p.setPen(QColor("#58A6FF"))
     p.drawText(QRect(0, 60, W, 50), Qt.AlignmentFlag.AlignCenter, "RV Circuit Studio")
 
-    sub_font = QFont("JetBrains Mono", 11)
+    sub_font = QFont(MONO_FONT_FAMILY, 11)
     p.setFont(sub_font)
     p.setPen(QColor("#3FB950"))
     p.drawText(QRect(0, 115, W, 25), Qt.AlignmentFlag.AlignCenter, "CircuitPython IDE")
 
-    ver_font = QFont("JetBrains Mono", 9)
+    ver_font = QFont(MONO_FONT_FAMILY, 9)
     p.setFont(ver_font)
     p.setPen(QColor("#8B949E"))
-    p.drawText(QRect(0, 145, W, 20), Qt.AlignmentFlag.AlignCenter, "v0.1.0")
+    from ._version import __version__
+    p.drawText(QRect(0, 145, W, 20), Qt.AlignmentFlag.AlignCenter, f"v{__version__}")
 
     p.drawText(QRect(0, 240, W, 20), Qt.AlignmentFlag.AlignCenter, "rvembedded.com")
 
@@ -164,7 +169,7 @@ def _update_splash(splash, pix, bar_rect, progress, message=""):
         p.drawRoundedRect(bx, by, fill_w, bh, 3, 3)
 
     if message:
-        p.setFont(QFont("JetBrains Mono", 8))
+        p.setFont(QFont(MONO_FONT_FAMILY, 8))
         p.setPen(QColor("#8B949E"))
         p.drawText(bx, by + bh + 14, message)
 
@@ -185,6 +190,12 @@ def main():
         font_id = QFontDatabase.addApplicationFont(font_path)
         families = QFontDatabase.applicationFontFamilies(font_id)
         if families:
+            # Use the EXACT registered family name everywhere; the bundled file
+            # registers as "JetBrains Mono NL", and asking for "JetBrains Mono"
+            # triggers Qt's slow missing-family alias lookup + a warning.
+            global MONO_FONT_FAMILY
+            MONO_FONT_FAMILY = families[0]
+            app.setProperty("mono_font_family", families[0])
             print(f"[RV Circuit Studio] Font: {families[0]}")
 
     pix, bar_rect = _create_splash()
@@ -227,6 +238,11 @@ def main():
 
     def on_close(event):
         editor.save_editor_state()
+        try:
+            if hasattr(editor, "camera_panel"):
+                editor.camera_panel.cleanup()
+        except Exception:
+            pass
         config = _load_config()
         config["last_project_directory"] = editor.current_project_directory or ""
         _save_config(config)
@@ -235,7 +251,7 @@ def main():
     window.closeEvent = on_close
 
     status = QStatusBar()
-    status.showMessage("RV Circuit Studio — Ready  |  Connect a CircuitPython board to begin")
+    status.showMessage("RV Circuit Studio - Ready  |  Connect a CircuitPython board to begin")
     window.setStatusBar(status)
 
     if os.path.exists(STATE_FILE):

@@ -59,6 +59,8 @@ class FindReplaceWidget(QWidget):
 
     def find_next(self):
         find_text = self.find_input.text()
+        if not find_text:
+            return
 
         if self.editor_widget:
             cursor = self.editor_widget.qpart.textCursor()
@@ -80,6 +82,8 @@ class FindReplaceWidget(QWidget):
     def replace(self):
         find_text = self.find_input.text()
         replace_text = self.replace_input.text()
+        if not find_text:
+            return
 
         if self.editor_widget:
             cursor = self.editor_widget.qpart.textCursor()
@@ -91,15 +95,30 @@ class FindReplaceWidget(QWidget):
     def replace_all(self):
         find_text = self.find_input.text()
         replace_text = self.replace_input.text()
+        if not find_text:
+            return
 
         if self.editor_widget:
-            self.editor_widget.qpart.moveCursor(QTextCursor.MoveOperation.Start)
-
-            while find_text in self.editor_widget.qpart.toPlainText():
-                start = self.editor_widget.qpart.toPlainText().find(find_text)
-                cursor = self.editor_widget.qpart.textCursor()
-                cursor.setPosition(start)
-                cursor.setPosition(start + len(find_text), QTextCursor.MoveMode.KeepAnchor)
-                cursor.insertText(replace_text)
-                self.editor_widget.qpart.setTextCursor(cursor)
-
+            # Operate on the text directly and advance past each replacement.
+            # Searching from the start in a loop would hang forever whenever
+            # replace_text contains find_text (e.g. replace "a" with "ba").
+            text = self.editor_widget.qpart.toPlainText()
+            if find_text not in text:
+                return
+            result = []
+            i = 0
+            n = len(find_text)
+            while True:
+                j = text.find(find_text, i)
+                if j == -1:
+                    result.append(text[i:])
+                    break
+                result.append(text[i:j])
+                result.append(replace_text)
+                i = j + n
+            new_text = "".join(result)
+            cursor = self.editor_widget.qpart.textCursor()
+            cursor.beginEditBlock()
+            cursor.select(QTextCursor.SelectionType.Document)
+            cursor.insertText(new_text)
+            cursor.endEditBlock()

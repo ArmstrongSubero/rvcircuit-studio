@@ -72,7 +72,11 @@ class _CodeView(QWidget):
         self._view = QTextEdit()
         self._view.setReadOnly(True)
         self._view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        font = QFont("JetBrains Mono", 10)
+        try:
+            from .app import MONO_FONT_FAMILY as _mono
+        except Exception:
+            _mono = "JetBrains Mono NL"
+        font = QFont(_mono, 10)
         font.setStyleHint(QFont.StyleHint.Monospace)
         self._view.setFont(font)
         self._view.setStyleSheet(
@@ -423,7 +427,7 @@ class DebuggerPanel(QWidget):
         header.setStyleSheet(f"background: {CS_BG_TOOLBAR}; border-bottom: 1px solid #30363d;")
         hrow = QHBoxLayout(header)
         hrow.setContentsMargins(8, 0, 8, 0)
-        title = QLabel("Debugger — Configuration")
+        title = QLabel("Debugger - Configuration")
         title.setStyleSheet(f"color: {CS_TEXT}; font-size: 11px; font-weight: bold;")
         hrow.addWidget(title)
         hrow.addStretch()
@@ -529,7 +533,17 @@ class DebuggerPanel(QWidget):
         Called with every chunk of serial data from repl_panel.data_received.
         Accumulates into a buffer and extracts debug state JSON blocks.
         """
+        # This is wired to every serial chunk, including normal (non-debug)
+        # REPL output. Without a cap, _serial_buf would grow for the whole
+        # session on a streaming board. Only accumulate while a debug session
+        # is active, and bound the buffer regardless.
+        if not getattr(self, "_debugger_running", False):
+            self._serial_buf = ""
+            return
+
         self._serial_buf += text
+        if len(self._serial_buf) > 131072:
+            self._serial_buf = self._serial_buf[-16384:]
 
         states = parse_debug_output(self._serial_buf)
 
@@ -540,6 +554,9 @@ class DebuggerPanel(QWidget):
                 self._serial_buf = self._serial_buf[last_end + len(DEBUG_OUT_END):]
 
             self._debug_history.extend(states)
+            # Bound history so a long debug session doesn't grow without limit.
+            if len(self._debug_history) > 2000:
+                self._debug_history = self._debug_history[-2000:]
             self._history_index = len(self._debug_history) - 1
 
             latest = self._debug_history[-1]
