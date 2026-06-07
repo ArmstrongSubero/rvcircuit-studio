@@ -8,7 +8,7 @@ Desktop CircuitPython IDE. **Privacy First**. Powerful and **Low Latency**. Nati
 ##
 
 
-The **first** dedicated CircuitPython IDE with: 
+The **first** native dedicated CircuitPython IDE with: 
   - Auto backup to host on every Run
   - Record to CSV data pipeline (record live, autosave, analyze with stats)
   - Open CSV from board into analysis view
