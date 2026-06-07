@@ -21,8 +21,7 @@ Native, performant IDE that's 100% offline from day one, no accounts, no cloud. 
 
 **Protect your privacy!**
 
-
-WE WILL NEVER GATHER OR COLLECT ANY OF YOUR DATA! ALL FREE AND OPEN SOURCE!! 
+No accounts, no telemetry, no cloud. Your code stays on your machine. ALL FREE AND OPEN SOURCE!! 
 
 ## Key features
 
