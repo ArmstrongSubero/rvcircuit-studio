@@ -103,7 +103,7 @@ Share your microcontroller setup during streaming, remote learning, or collabora
 
 ## What it does
 
-Code editor with syntax highlighting and code folding that auto detects CircuitPython boards. Saves code.py to the CIRCUITPY drive and the board reloads automatically, there is a serial REPL with color support. Source level debugger with breakpoints and watch expressions. Real time serial plotter with analysis and library manager for Adafruit bundles. Snippet manager with common CircuitPython patterns.
+Code editor with syntax highlighting, debugger, data captrue and analysis that auto detects CircuitPython boards. Saves code.py to the CIRCUITPY drive and the board reloads automatically, there is a serial REPL with color support. Source level debugger with breakpoints and watch expressions. Real time serial plotter with analysis and library manager for Adafruit bundles. Snippet manager with common CircuitPython patterns.
 
 ## Install
 
