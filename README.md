@@ -97,7 +97,7 @@ Share your microcontroller setup during streaming, remote learning, or collabora
 | Offline / native | Yes | Yes | No | Yes |
 | Zero-install option | .exe download | pip | Yes | No |
 | Auto-start on connect | Yes | No | N/A | No |
-| Code snippets library | Yes | Yes | No | Extensions |
+| Code snippets library | Yes | No | No | Extensions |
 
 ---
 
