@@ -65,6 +65,9 @@ class SerialPlotter(QWidget):
         self._paused = True
         self._line_buf = ""                  # partial line accumulator
         self._sample_counter = 0
+        self._recording = False
+        self._xy_mode = False
+        self._record_data: dict[str, list] = {}  # name -> [(sample, value)]
 
         if HAS_PYQTGRAPH:
             self._build_pyqtgraph_ui()
@@ -106,6 +109,25 @@ class SerialPlotter(QWidget):
         )
         self._btn_pause.clicked.connect(self._on_pause_toggle)
 
+        self._btn_record = QPushButton("Record")
+        self._btn_record.setFixedWidth(80)
+        self._btn_record.setStyleSheet(
+            f"QPushButton {{ background:{CS_ACCENT_SOFT}; color:{CS_TEXT}; "
+            f"border:none; border-radius:3px; padding:3px 8px; }}"
+            f"QPushButton:hover {{ background:{CS_DANGER}; color:#fff; }}"
+        )
+        self._btn_record.clicked.connect(self._on_record_toggle)
+
+        self._btn_analyze = QPushButton("Analyze")
+        self._btn_analyze.setFixedWidth(80)
+        self._btn_analyze.setEnabled(False)
+        self._btn_analyze.setStyleSheet(
+            f"QPushButton {{ background:{CS_ACCENT_SOFT}; color:{CS_TEXT}; "
+            f"border:none; border-radius:3px; padding:3px 8px; }}"
+            f"QPushButton:hover {{ background:{CS_ACCENT}; color:#fff; }}"
+        )
+        self._btn_analyze.clicked.connect(self._on_analyze)
+
         btn_clear = QPushButton("✕  Clear")
         btn_clear.setFixedWidth(80)
         btn_clear.setStyleSheet(
@@ -124,6 +146,32 @@ class SerialPlotter(QWidget):
         ctrl_layout.addWidget(lbl_win)
         ctrl_layout.addWidget(self._spin_window)
         ctrl_layout.addWidget(self._btn_pause)
+        ctrl_layout.addWidget(self._btn_record)
+        ctrl_layout.addWidget(self._btn_analyze)
+
+        self._btn_open_csv = QPushButton("Open CSV")
+        self._btn_open_csv.setFixedWidth(80)
+        self._btn_open_csv.setStyleSheet(
+            f"QPushButton {{ background:{CS_ACCENT_SOFT}; color:{CS_TEXT}; "
+            f"border:none; border-radius:3px; padding:3px 8px; }}"
+            f"QPushButton:hover {{ background:{CS_ACCENT}; color:#fff; }}"
+        )
+        self._btn_open_csv.clicked.connect(self._on_open_csv)
+
+        self._btn_xy = QPushButton("XY")
+        self._btn_xy.setFixedWidth(40)
+        self._btn_xy.setCheckable(True)
+        self._btn_xy.setToolTip("XY mode: first column = X axis (for parametric/phase plots)")
+        self._btn_xy.setStyleSheet(
+            f"QPushButton {{ background:{CS_ACCENT_SOFT}; color:{CS_TEXT}; "
+            f"border:none; border-radius:3px; padding:3px 6px; }}"
+            f"QPushButton:checked {{ background:{CS_ACCENT}; color:#fff; }}"
+            f"QPushButton:hover {{ background:{CS_ACCENT}; color:#fff; }}"
+        )
+        self._btn_xy.toggled.connect(self._on_xy_toggle)
+
+        ctrl_layout.addWidget(self._btn_open_csv)
+        ctrl_layout.addWidget(self._btn_xy)
         ctrl_layout.addWidget(btn_clear)
         ctrl_layout.addStretch()
         ctrl_layout.addWidget(self._legend_label)
@@ -164,7 +212,7 @@ class SerialPlotter(QWidget):
         layout.addWidget(lbl)
 
     def feed(self, text: str):
-        """Accept a raw serial chunk (may contain partial lines)."""
+        """Feed raw serial text to the plotter."""
         if not HAS_PYQTGRAPH or self._paused:
             return
         self._line_buf += text
@@ -207,6 +255,17 @@ class SerialPlotter(QWidget):
             self._push_values(labelled)
             return
 
+        # Tuple format: the #1 format in every Adafruit CircuitPython
+        # plotting tutorial.  print((light.value,)) outputs "(23456,)";
+        # print((x, y, z)) outputs "(1.2, -3.4, 0.5)".
+        # Try this BEFORE plain CSV so that parenthesized lines are handled
+        # correctly instead of failing float("(42") silently.
+        tupled = self._try_parse_tuple(line)
+        if tupled is not None:
+            named = {f"Ch {i+1}": v for i, v in enumerate(tupled)}
+            self._push_values(named)
+            return
+
         plain = self._try_parse_csv(line)
         if plain is not None:
             named = {f"Ch {i+1}": v for i, v in enumerate(plain)}
@@ -226,12 +285,66 @@ class SerialPlotter(QWidget):
         except ValueError:
             return None
 
-    def _try_parse_csv(self, line: str):
+    def _try_parse_tuple(self, line: str):
         """
-        Accept   42   or   1.5,-3.2,100
+        Parse Python tuple output from print().
+
+        Adafruit's canonical CircuitPython plotting format:
+          print((light.value,))    -> serial outputs "(23456,)"
+          print((x, y, z))         -> serial outputs "(1.2, -3.4, 0.5)"
+          print((True, False))     -> serial outputs "(True, False)"
+
         Returns list[float] or None.
         """
-        parts = [p.strip() for p in line.split(",")]
+        # Must start with ( and end with ) to be a tuple line.
+        if not line.startswith("(") or not line.endswith(")"):
+            return None
+
+        # Strip outer parens: "(42,)" -> "42,"
+        inner = line[1:-1].strip()
+        if not inner:
+            return None
+
+        # Split on comma, strip whitespace from each part.
+        parts = [p.strip() for p in inner.split(",")]
+
+        # Convert each part to float. Handle:
+        #   - trailing comma in single-value tuples: (42,) -> ["42", ""]
+        #   - True/False from button tutorials: (True, False) -> [1.0, 0.0]
+        #   - integers and floats, positive and negative
+        values = []
+        for p in parts:
+            if not p:
+                continue  # trailing comma in (42,) produces empty string
+            if p == "True":
+                values.append(1.0)
+            elif p == "False":
+                values.append(0.0)
+            elif p == "None":
+                continue  # skip None values
+            else:
+                try:
+                    values.append(float(p))
+                except ValueError:
+                    return None  # non-numeric content, not a data tuple
+
+        return values if values else None
+
+    def _try_parse_csv(self, line: str):
+        """
+        Accept   42   or   1.5,-3.2,100   or   0.314 0.309 -0.309
+        Handles comma-separated AND space-separated numbers.
+        Returns list[float] or None.
+        """
+        if "," in line:
+            parts = [p.strip() for p in line.split(",")]
+            try:
+                values = [float(p) for p in parts if p]
+                if values:
+                    return values
+            except ValueError:
+                pass
+        parts = line.split()
         try:
             values = [float(p) for p in parts if p]
             if values:
@@ -269,11 +382,33 @@ class SerialPlotter(QWidget):
 
             info = self._traces[name]
             info["buf"].append(val)
-            x = list(range(self._sample_counter - len(info["buf"]), self._sample_counter))
-            info["curve"].setData(x, list(info["buf"]))
+
+        # Update curves: XY mode or normal time mode
+        names = list(self._traces.keys())
+        if self._xy_mode and len(names) >= 2:
+            x_buf = list(self._traces[names[0]]["buf"])
+            self._traces[names[0]]["curve"].setData([], [])  # hide X trace
+            for name in names[1:]:
+                info = self._traces[name]
+                y_buf = list(info["buf"])
+                n = min(len(x_buf), len(y_buf))
+                if n > 0:
+                    info["curve"].setData(x_buf[-n:], y_buf[-n:])
+        else:
+            for name, info in self._traces.items():
+                y = list(info["buf"])
+                x = list(range(self._sample_counter - len(y), self._sample_counter))
+                info["curve"].setData(x, y)
 
         if self._sample_counter % 10 == 0:
             self._plot_widget.enableAutoRange(axis="y")
+
+        # Store data when recording
+        if self._recording:
+            for name, val in values.items():
+                if name not in self._record_data:
+                    self._record_data[name] = []
+                self._record_data[name].append((self._sample_counter, val))
 
     def _update_legend(self):
         if not self._traces:
@@ -293,6 +428,394 @@ class SerialPlotter(QWidget):
         for info in self._traces.values():
             old = list(info["buf"])
             info["buf"] = collections.deque(old[-val:], maxlen=val)
+
+    def _on_xy_toggle(self, checked):
+        """Toggle XY mode."""
+        self._xy_mode = checked
+        # Force a redraw of all traces
+        if self._traces:
+            names = list(self._traces.keys())
+            if len(names) >= 2 and checked:
+                x_name = names[0]
+                x_buf = list(self._traces[x_name]["buf"])
+                # Hide the X trace, show others against it
+                self._traces[x_name]["curve"].setData([], [])
+                for name in names[1:]:
+                    info = self._traces[name]
+                    y_buf = list(info["buf"])
+                    n = min(len(x_buf), len(y_buf))
+                    if n > 0:
+                        info["curve"].setData(x_buf[-n:], y_buf[-n:])
+                self._plot_widget.setLabel("bottom", x_name)
+            else:
+                # Back to time mode - redraw all normally
+                for name, info in self._traces.items():
+                    y = list(info["buf"])
+                    x = list(range(self._sample_counter - len(y), self._sample_counter))
+                    info["curve"].setData(x, y)
+                self._plot_widget.setLabel("bottom", "Samples")
+            self._plot_widget.enableAutoRange()
+
+    def _on_record_toggle(self):
+        self._recording = not self._recording
+        if self._recording:
+            self._record_data.clear()
+            self._btn_record.setText("Stop Rec")
+            self._btn_record.setStyleSheet(
+                f"QPushButton {{ background:{CS_DANGER}; color:#fff; "
+                f"border:none; border-radius:3px; padding:3px 8px; }}"
+                f"QPushButton:hover {{ background:#da3633; color:#fff; }}"
+            )
+            self._btn_analyze.setEnabled(False)
+            # Auto-resume if paused
+            if self._paused:
+                self._on_pause_toggle()
+        else:
+            self._btn_record.setText("Record")
+            self._btn_record.setStyleSheet(
+                f"QPushButton {{ background:{CS_ACCENT_SOFT}; color:{CS_TEXT}; "
+                f"border:none; border-radius:3px; padding:3px 8px; }}"
+                f"QPushButton:hover {{ background:{CS_DANGER}; color:#fff; }}"
+            )
+            self._btn_analyze.setEnabled(bool(self._record_data))
+            # Auto-save recorded data to host
+            if self._record_data:
+                self._auto_save_recording()
+
+    def _on_open_csv(self):
+        """Open a CSV file in the analysis view."""
+        from PySide6.QtWidgets import QFileDialog
+        # Try to start in the CIRCUITPY drive if available
+        start_dir = ""
+        try:
+            from .circuitpython_mode import detect_circuitpy
+            cp = detect_circuitpy()
+            if cp:
+                start_dir = cp
+        except Exception:
+            pass
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open CSV Data File", start_dir,
+            "CSV Files (*.csv *.txt *.log);;All Files (*)"
+        )
+        if not path:
+            return
+        dataset = self._load_csv_file(path)
+        if dataset:
+            try:
+                self._analyze_dataset(dataset, title=f"Analysis - {os.path.basename(path)}")
+            except Exception as e:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.critical(self, "Analysis Error", str(e))
+
+    def _load_csv_file(self, path: str) -> dict:
+        """Load CSV into dataset format. First column used as X if it looks like an index."""
+        import csv as csv_mod
+        dataset = {}
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                reader = csv_mod.reader(f)
+                rows = list(reader)
+            if not rows:
+                return {}
+            # Detect header
+            first = rows[0]
+            has_header = False
+            for cell in first:
+                cell = cell.strip()
+                if cell:
+                    try:
+                        float(cell)
+                    except ValueError:
+                        has_header = True
+                        break
+            if has_header:
+                headers = [c.strip() or f"col{i}" for i, c in enumerate(first)]
+                data_rows = rows[1:]
+            else:
+                headers = [f"col{i}" for i in range(len(first))]
+                data_rows = rows
+
+            # Detect if the first column is an index/time column that should
+            # be the X axis, not a data trace.
+            _INDEX_NAMES = {"sample", "index", "time", "timestamp", "t",
+                            "seconds", "ms", "elapsed", "col0"}
+            x_col = None
+            if headers and headers[0].lower() in _INDEX_NAMES:
+                x_col = 0
+            data_headers = [h for i, h in enumerate(headers) if i != x_col]
+
+            # Parse the X values if we have an index column
+            x_values = []
+            if x_col is not None:
+                for row in data_rows:
+                    try:
+                        x_values.append(float(row[x_col].strip()))
+                    except (ValueError, IndexError):
+                        x_values.append(None)
+
+            # Initialize dataset for data columns only
+            for h in data_headers:
+                dataset[h] = []
+
+            # Parse rows
+            for idx, row in enumerate(data_rows):
+                x = x_values[idx] if (x_col is not None and idx < len(x_values)
+                                       and x_values[idx] is not None) else idx
+                for col_idx, cell in enumerate(row):
+                    if col_idx >= len(headers) or col_idx == x_col:
+                        continue
+                    h = headers[col_idx]
+                    cell = cell.strip()
+                    try:
+                        val = float(cell)
+                        dataset[h].append((x, val))
+                    except (ValueError, IndexError):
+                        pass
+            # Remove empty columns
+            dataset = {k: v for k, v in dataset.items() if v}
+        except Exception:
+            return {}
+        return dataset
+
+    def _auto_save_recording(self):
+        """Save recording to ~/CircuitStudioData/."""
+        import datetime
+        try:
+            home = os.path.expanduser("~")
+            save_dir = os.path.join(home, "CircuitStudioData")
+            os.makedirs(save_dir, exist_ok=True)
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = os.path.join(save_dir, f"recording_{ts}.csv")
+            names = list(self._record_data.keys())
+            all_samples = set()
+            for data in self._record_data.values():
+                for s, _ in data:
+                    all_samples.add(s)
+            rows = sorted(all_samples)
+            lookup = {}
+            for name, data in self._record_data.items():
+                for s, v in data:
+                    lookup[(name, s)] = v
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("sample," + ",".join(names) + "\n")
+                for s in rows:
+                    vals = [str(lookup.get((n, s), "")) for n in names]
+                    f.write(f"{s}," + ",".join(vals) + "\n")
+        except Exception:
+            pass
+
+    def _analyze_dataset(self, dataset: dict, title: str = "Data Analysis"):
+        """Open dataset in the analysis view."""
+        if not dataset:
+            return
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QLabel,
+                                        QHBoxLayout, QPushButton, QCheckBox)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Plotter - {title}")
+        dlg.setMinimumSize(900, 560)
+        dlg.setStyleSheet(f"QDialog {{ background: {CS_BG_DEEP}; }}")
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(4)
+
+        # --- Stats bar ---
+        stats_parts = []
+        names_list = list(dataset.keys())
+        for name in names_list:
+            data = dataset[name]
+            vals = [v for _, v in data]
+            if vals:
+                mn, mx, avg = min(vals), max(vals), sum(vals) / len(vals)
+                std = (sum((v - avg) ** 2 for v in vals) / len(vals)) ** 0.5
+                stats_parts.append(
+                    f'<b>{name}</b>: '
+                    f'min={mn:.2f}  max={mx:.2f}  avg={avg:.2f}  '
+                    f'std={std:.2f}  ({len(vals)} pts)'
+                )
+        stats = QLabel("  |  ".join(stats_parts))
+        stats.setStyleSheet(f"color:{CS_TEXT}; font-size:10px; padding:4px;")
+        stats.setWordWrap(True)
+        layout.addWidget(stats)
+
+        legend_row = QHBoxLayout()
+        legend_row.setSpacing(12)
+        legend_row.addWidget(QLabel("Traces:"))
+        trace_curves = {}
+
+        # --- Plot ---
+        plot = pg.PlotWidget()
+        plot.showGrid(x=True, y=True, alpha=0.2)
+        plot.setLabel("bottom", "Sample")
+        plot.setLabel("left", "Value")
+        plot.setMouseEnabled(x=True, y=True)
+
+        # Crosshair + coordinate readout
+        vline = pg.InfiniteLine(angle=90, movable=False,
+                                pen=pg.mkPen(CS_TEXT_MUTED, width=1))
+        hline = pg.InfiniteLine(angle=0, movable=False,
+                                pen=pg.mkPen(CS_TEXT_MUTED, width=1))
+        plot.addItem(vline, ignoreBounds=True)
+        plot.addItem(hline, ignoreBounds=True)
+        cursor_label = pg.TextItem("", color=CS_TEXT, anchor=(0, 1))
+        plot.addItem(cursor_label, ignoreBounds=True)
+
+        # Per-point hover: find nearest point and show its value
+        all_curve_data = []
+        import bisect as _bisect
+
+        def _mouse_moved(evt):
+            pos = evt if hasattr(evt, "x") else evt[0]
+            if not plot.sceneBoundingRect().contains(pos):
+                return
+            mp = plot.plotItem.vb.mapSceneToView(pos)
+            vline.setPos(mp.x())
+            hline.setPos(mp.y())
+            # Find nearest point across all visible traces
+            best = None
+            best_dist = float("inf")
+            for cname, cx, cy, curve in all_curve_data:
+                if not curve.isVisible():
+                    continue
+                if not cx:
+                    continue
+                # Binary search for nearest x
+                idx = _bisect.bisect_left(cx, mp.x())
+                for check in (max(0, idx - 1), min(idx, len(cx) - 1)):
+                    dx = abs(cx[check] - mp.x())
+                    if dx < best_dist:
+                        best_dist = dx
+                        best = (cname, cx[check], cy[check])
+            if best:
+                cursor_label.setText(
+                    f"x={mp.x():.1f}  y={mp.y():.3f}\n"
+                    f"{best[0]}: ({best[1]:.0f}, {best[2]:.3f})"
+                )
+            else:
+                cursor_label.setText(f"x={mp.x():.1f}  y={mp.y():.3f}")
+            cursor_label.setPos(mp.x(), mp.y())
+        plot.scene().sigMouseMoved.connect(_mouse_moved)
+
+        # Draw traces + build clickable legend checkboxes
+        colour_idx = 0
+        for name in names_list:
+            data = dataset[name]
+            x = [s for s, _ in data]
+            y = [v for _, v in data]
+            col = _TRACE_COLOURS[colour_idx % len(_TRACE_COLOURS)]
+            colour_idx += 1
+            curve = plot.plot(x, y, pen=pg.mkPen(color=col, width=1.5), name=name)
+            trace_curves[name] = curve
+            all_curve_data.append((name, x, y, curve))
+
+            # Clickable legend checkbox
+            cb = QCheckBox(name)
+            cb.setChecked(True)
+            cb.setStyleSheet(
+                f"QCheckBox {{ color: {col}; font-weight: bold; font-size: 10px; }}"
+            )
+            _curve_ref = curve
+            cb.toggled.connect(lambda checked, c=_curve_ref: c.setVisible(checked))
+            legend_row.addWidget(cb)
+
+        legend_row.addStretch()
+
+        # XY mode toggle for parametric/phase plots
+        if len(names_list) >= 2:
+            xy_cb = QCheckBox("XY")
+            xy_cb.setToolTip("Use first column as X axis (parametric/phase plots)")
+            xy_cb.setStyleSheet(f"QCheckBox {{ color: {CS_ACCENT}; font-weight: bold; font-size: 10px; }}")
+            def _toggle_xy(checked):
+                if checked and len(names_list) >= 2:
+                    x_name = names_list[0]
+                    x_data = [v for _, v in dataset[x_name]]
+                    # Hide the first trace, replot others against it
+                    trace_curves[x_name].setData([], [])
+                    for i, name in enumerate(names_list[1:]):
+                        y_data = [v for _, v in dataset[name]]
+                        n = min(len(x_data), len(y_data))
+                        trace_curves[name].setData(x_data[:n], y_data[:n])
+                        # Update all_curve_data for hover
+                        all_curve_data[i + 1] = (name, x_data[:n], y_data[:n], trace_curves[name])
+                    plot.setLabel("bottom", x_name)
+                    plot.enableAutoRange()
+                else:
+                    # Restore normal index-based plotting
+                    for i, name in enumerate(names_list):
+                        x = [s for s, _ in dataset[name]]
+                        y = [v for _, v in dataset[name]]
+                        trace_curves[name].setData(x, y)
+                        all_curve_data[i] = (name, x, y, trace_curves[name])
+                    plot.setLabel("bottom", "Sample")
+                    plot.enableAutoRange()
+            xy_cb.toggled.connect(_toggle_xy)
+            legend_row.addWidget(xy_cb)
+
+        # Sample count label
+        total = sum(len(d) for d in dataset.values())
+        count_lbl = QLabel(f"{total} samples")
+        count_lbl.setStyleSheet(f"color:{CS_TEXT_MUTED}; font-size:10px;")
+        legend_row.addWidget(count_lbl)
+
+        layout.addLayout(legend_row)
+        layout.addWidget(plot, stretch=1)
+
+        # --- Buttons ---
+        btn_row = QHBoxLayout()
+        # Auto-fit button
+        fit_btn = QPushButton("Auto Fit")
+        fit_btn.setFixedWidth(80)
+        fit_btn.clicked.connect(lambda: plot.enableAutoRange())
+        btn_row.addWidget(fit_btn)
+        btn_row.addStretch()
+        export_btn = QPushButton("Export CSV")
+        export_btn.setFixedWidth(100)
+        export_btn.clicked.connect(lambda: self._export_dataset_csv(dlg, dataset))
+        btn_row.addWidget(export_btn)
+        close_btn = QPushButton("Close")
+        close_btn.setFixedWidth(80)
+        close_btn.clicked.connect(dlg.accept)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+        dlg.exec()
+
+    def _export_dataset_csv(self, parent, dataset):
+        """Export any dataset to CSV."""
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getSaveFileName(
+            parent, "Export CSV", "plotter_data.csv", "CSV Files (*.csv)"
+        )
+        if not path:
+            return
+        names = list(dataset.keys())
+        all_samples = set()
+        for data in dataset.values():
+            for s, _ in data:
+                all_samples.add(s)
+        rows = sorted(all_samples)
+        lookup = {}
+        for name, data in dataset.items():
+            for s, v in data:
+                lookup[(name, s)] = v
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("sample," + ",".join(names) + "\n")
+                for s in rows:
+                    vals = [str(lookup.get((n, s), "")) for n in names]
+                    f.write(f"{s}," + ",".join(vals) + "\n")
+        except Exception:
+            pass
+
+    def _on_analyze(self):
+        """Open recorded data in the analysis view."""
+        if not self._record_data:
+            return
+        try:
+            self._analyze_dataset(self._record_data, title="Recorded Data Analysis")
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Analysis Error", str(e))
 
     def _on_pause_toggle(self):
         self._paused = not self._paused

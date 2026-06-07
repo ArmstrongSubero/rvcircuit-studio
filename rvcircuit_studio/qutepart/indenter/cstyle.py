@@ -167,7 +167,7 @@ class IndentAlgCStyle(IndentAlgBase):
             if CFG_AUTO_INSERT_STAR:
                 # only add '*', if there is none yet.
                 indentation += ' '
-                if not blockTextStripped.endswith('*'):
+                if not blockTextStripped.startswith('*'):
                     indentation += '*'
                 secondCharIsSpace = len(blockTextStripped) > 1 and blockTextStripped[1].isspace()
                 if not secondCharIsSpace and \
@@ -289,7 +289,7 @@ class IndentAlgCStyle(IndentAlgBase):
 
         # found non-empty line
         currentBlockText = currentBlock.text()
-        if re.match(r'^\s*(if\b|for|do\b|while|switch|[}]?\s*else|((private|public|protected|case|default|signals|Q_SIGNALS).*:))', currentBlockText) is None:
+        if re.match(r'^\s*(if\b|for\b|do\b|while\b|switch\b|[}]?\s*else|((private|public|protected|case|default|signals|Q_SIGNALS).*:))', currentBlockText) is None:
             return None
 
         indentation = None
@@ -338,7 +338,7 @@ class IndentAlgCStyle(IndentAlgBase):
         # found non-empty line
         currentText = currentBlock.text()
         if currentText.rstrip().endswith(';') and \
-           re.search(r'^\s*(if\b|[}]?\s*else|do\b|while\b|for)', currentText) is None:
+           re.search(r'^\s*(if\b|[}]?\s*else|do\b|while\b|for\b)', currentText) is None:
             # idea: we had something like:
             #   if/while/for (expression)
             #       statement();  <-- we catch this trailing ';'
@@ -353,7 +353,7 @@ class IndentAlgCStyle(IndentAlgBase):
                     indentation = self._blockIndent(block)
 
                     if len(indentation) < len(currentIndentation):
-                        if re.search(r'^\s*(if\b|[}]?\s*else|do\b|while\b|for)[^{]*$', block.text()) is not None:
+                        if re.search(r'^\s*(if\b|[}]?\s*else|do\b|while\b|for\b)[^{]*$', block.text()) is not None:
                             dbg("tryCondition: success in line %d" % block.blockNumber())
                             return indentation
                         break

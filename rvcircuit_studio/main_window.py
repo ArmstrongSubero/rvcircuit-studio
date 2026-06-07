@@ -81,6 +81,11 @@ class CircuitStudioEditor(QWidget):
 
         self._build_board_status_bar()
 
+        # Inline debug bar - shown only during debug sessions, matching
+        self._debug_bar = self._build_debug_bar()
+        self._debug_bar.setVisible(False)
+        self.main_layout.addWidget(self._debug_bar)
+
         self.main_splitter    = QSplitter(Qt.Orientation.Vertical)
         self.central_splitter = QSplitter(Qt.Orientation.Horizontal)
 
@@ -129,7 +134,14 @@ class CircuitStudioEditor(QWidget):
         self.editor_tab_widget.setTabsClosable(True)
         self.editor_tab_widget.tabCloseRequested.connect(self.close_tab)
         self.central_splitter.addWidget(self.editor_tab_widget)
-        self.central_splitter.setSizes([220, 900])
+
+        self._debug_side_panel = QWidget()
+        self._debug_side_panel.setMinimumWidth(280)
+        self._debug_side_panel.setStyleSheet(f"background: {CS_BG_DEEP};")
+        self._debug_side_panel.setVisible(False)
+        self.central_splitter.addWidget(self._debug_side_panel)
+
+        self.central_splitter.setSizes([220, 900, 0])
 
         self.snippet_manager = SnippetManager(self.snippets_window_bottom, self.editor_tab_widget)
 
@@ -155,15 +167,11 @@ class CircuitStudioEditor(QWidget):
         self.repl_tab_btn.setCheckable(True)
         self.repl_tab_btn.setChecked(False)
 
-        self.debug_tab_btn = QPushButton("Debug")
-        self.debug_tab_btn.setStyleSheet(_btn_style_inactive)
-
         self.camera_tab_btn = QPushButton("Camera")
         self.camera_tab_btn.setStyleSheet(_btn_style_inactive)
 
         tab_bar_layout.addWidget(self.repl_tab_btn)
         tab_bar_layout.addWidget(self.plotter_tab_btn)
-        tab_bar_layout.addWidget(self.debug_tab_btn)
         tab_bar_layout.addWidget(self.camera_tab_btn)
         tab_bar_layout.addStretch()
 
@@ -181,13 +189,35 @@ class CircuitStudioEditor(QWidget):
         self.bottom_stack = QStackedWidget()
         self.repl_panel   = REPLWidget()
         self.plotter_panel = self._build_plotter_panel()
-        self.debugger_panel = DebuggerPanel(repl_widget=None, parent=self)
         self.bottom_stack.addWidget(self.repl_panel)      # index 0
         self.bottom_stack.addWidget(self.plotter_panel)   # index 1
-        self.bottom_stack.addWidget(self.debugger_panel)  # index 2
         from .camera_panel import CameraPanel
         self.camera_panel = CameraPanel()
-        self.bottom_stack.addWidget(self.camera_panel)    # index 3
+        self.bottom_stack.addWidget(self.camera_panel)    # index 2
+
+        self.debugger_panel = DebuggerPanel(repl_widget=None, parent=self)
+        self.debugger_panel.set_main_editor(self)
+        self.debugger_panel.setVisible(False)
+
+        _dsp_layout = QVBoxLayout(self._debug_side_panel)
+        _dsp_layout.setContentsMargins(0, 0, 0, 0)
+        _dsp_layout.setSpacing(0)
+        _dsp_header = QLabel("  Advanced Debugger")
+        _dsp_header.setFixedHeight(28)
+        _dsp_header.setStyleSheet(
+            f"background: {CS_BG_TOOLBAR}; color: {CS_ACCENT}; "
+            f"font-weight: bold; font-size: 11px; border-bottom: 1px solid {CS_ACCENT_SOFT};"
+        )
+        _dsp_layout.addWidget(_dsp_header)
+        self.debugger_panel._config_page.setParent(self._debug_side_panel)
+        self.debugger_panel._config_page.setVisible(True)
+        _dsp_layout.addWidget(self.debugger_panel._config_page)
+        _watch_lbl = QLabel("  Watch Values:")
+        _watch_lbl.setStyleSheet(f"color: {CS_ACCENT}; font-weight: bold; font-size: 11px; padding: 4px 0;")
+        _dsp_layout.addWidget(_watch_lbl)
+        self.debugger_panel._watch_display.setParent(self._debug_side_panel)
+        self.debugger_panel._watch_display.setVisible(True)
+        _dsp_layout.addWidget(self.debugger_panel._watch_display)
 
         bottom_layout.addWidget(tab_bar)
         bottom_layout.addWidget(self.bottom_stack)
@@ -201,7 +231,6 @@ class CircuitStudioEditor(QWidget):
 
         self.repl_tab_btn.clicked.connect(self._on_repl_tab_clicked)
         self.plotter_tab_btn.clicked.connect(lambda: self._switch_bottom_tab(1))
-        self.debug_tab_btn.clicked.connect(self._on_debug_tab_clicked)
         self.camera_tab_btn.clicked.connect(self._on_camera_tab_clicked)
 
         self.bottom_panel.setVisible(False)
@@ -229,6 +258,13 @@ class CircuitStudioEditor(QWidget):
         self.toolbar_manager.initial_port_scan()
         if project_dir:
             self._open_project(project_dir)
+
+        # Apply font sizes from config on startup.
+        config = self._load_config()
+        editor_fs = int(config.get("editor", {}).get("font_size", 10))
+        self.apply_font_size_to_all_tabs(editor_fs)
+        ui_fs = int(config.get("ui", {}).get("font_size", 10))
+        self.apply_ui_font_size(ui_fs)
 
     def _build_board_status_bar(self):
         self.board_status_widget = QWidget()
@@ -281,6 +317,15 @@ class CircuitStudioEditor(QWidget):
         self._board_drive = drive
         self._repl_port   = port
 
+        # Clean up any stale debug instrumentation files left from a
+        # previous session. If these are on the board when it reloads,
+        # CircuitPython crashes trying to run them without the IDE.
+        try:
+            from .cp_debugger import cleanup_debug_files
+            cleanup_debug_files(drive)
+        except Exception:
+            pass
+
         boot = read_boot_out(drive)
         self._cp_version  = boot.get("version", "9")
         self._cp_major    = boot.get("major", "9")
@@ -318,6 +363,12 @@ class CircuitStudioEditor(QWidget):
             self._update_repl_btn(connected=True)
             self.bottom_panel.setVisible(True)
             self._switch_bottom_tab(0)
+
+            # Soft-reboot to start code.py on connect.
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(500, lambda: self.repl_panel._write_bytes(b'\x04'))
+            self._repl_running = True
+            self._set_run_btn_state(running=True)
 
             idx = self.toolbar_manager.port_combo.findText(port)
             if idx < 0:
@@ -411,16 +462,30 @@ class CircuitStudioEditor(QWidget):
             filename = config.get("board", {}).get("filename", "code.py")
             ok = save_to_board(code, drive, filename)
             if ok:
+                # "save locally as well as on the board so code isn't lost if
+                # the board breaks or corrupts").
+                try:
+                    proj = self.current_project_directory
+                    if proj:
+                        backup_path = os.path.join(proj, filename)
+                        from .cp_debugger import _safe_write
+                        _safe_write(backup_path, code)
+                except Exception:
+                    pass
                 self._repl_running = True
                 self._set_run_btn_state(running=True)
                 self.window.statusBar().showMessage(
-                    f"▶ Running - saved to {drive}{filename}", 3000)
+                    f"  Running - saved to {drive}{filename}", 3000)
                 if self.repl_panel.is_connected:
                     self.repl_panel.send_soft_reboot()
             else:
                 QMessageBox.critical(self.window, "Save Failed",
-                                     f"Could not write to {drive}.\n"
-                                     "Check board is not in safe mode.")
+                                     f"Could not write to {drive}.\n\n"
+                                     "Possible causes:\n"
+                                     "- Board filesystem is read-only (check boot.py\n"
+                                     "  for storage.remount() calls)\n"
+                                     "- Board is in safe mode\n\n"
+                                     "Try: double-tap reset, or remove boot.py.")
 
     def format_code(self):
         """Format current file with black."""
@@ -451,15 +516,193 @@ class CircuitStudioEditor(QWidget):
         btn = self.toolbar_manager.run_action
         w = self.toolbar_manager.toolbar.widgetForAction(btn)
         if running:
-            btn.setText("■ Stop")
+            btn.setText("  Stop")
             btn.setToolTip("Stop running code (Ctrl+C)")
             if w:
                 w.setStyleSheet("")
         else:
-            btn.setText("▶ Run")
+            btn.setText("  Run")
             btn.setToolTip("Save and run on board")
             if w:
                 w.setStyleSheet("background: #6c3fc4; border-radius: 4px; padding: 2px 4px;")
+
+    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+
+    def _build_debug_bar(self):
+        """Inline debug controls, shown during a debug session."""
+        _IDE_ROOT = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+
+        def _dbg_icon(name):
+            for ext in (".svg", ".png"):
+                p = os.path.join(_IDE_ROOT, "icons", name.replace(".png", ext))
+                if os.path.exists(p):
+                    return QIcon(p)
+            return QIcon()
+
+        bar = QWidget(self)
+        bar.setFixedHeight(36)
+        bar.setStyleSheet(f"background: {CS_BG_TOOLBAR}; border-bottom: 1px solid {CS_ACCENT_SOFT};")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(8, 3, 8, 3)
+        layout.setSpacing(5)
+
+        status = QLabel("Debugging")
+        status.setStyleSheet(f"color: {CS_ACCENT}; font-weight: bold; padding-right: 8px;")
+        layout.addWidget(status)
+        self._dbg_status_label = status
+
+        _btn_css = (
+            f"QPushButton {{ background: {CS_SURFACE}; "
+            f"border: 1px solid {CS_ACCENT_SOFT}; border-radius: 4px; }}"
+            f"QPushButton:hover {{ background: {CS_ACCENT_SOFT}; }}"
+        )
+
+        controls = [
+            ("debug_continue.png", "Run (visual line tracking)", self._cp_dbg_run),
+            ("debug_step_over.png", "Step to next line",         self._cp_dbg_step),
+            ("return.png",          "Restart from the top",      self._cp_dbg_restart),
+            ("debug_stop.png",      "Stop debugging",            self._cp_dbg_stop),
+        ]
+        for icon_name, tip, handler in controls:
+            btn = QPushButton(bar)
+            btn.setIcon(_dbg_icon(icon_name))
+            btn.setIconSize(QSize(18, 18))
+            btn.setToolTip(tip)
+            btn.setFixedSize(32, 28)
+            btn.setStyleSheet(_btn_css)
+            btn.clicked.connect(handler)
+            layout.addWidget(btn)
+
+        # File:line indicator
+        self._dbg_line_label = QLabel("")
+        self._dbg_line_label.setStyleSheet(
+            f"color: {CS_TEXT_MUTED}; font-size: 10px; padding: 0 8px;"
+        )
+        layout.addWidget(self._dbg_line_label)
+
+        # Watch values display
+        self._dbg_watches_label = QLabel("")
+        self._dbg_watches_label.setStyleSheet(
+            f"color: {CS_SUCCESS}; font-size: 10px; padding: 0 4px;"
+        )
+        layout.addWidget(self._dbg_watches_label)
+
+        layout.addStretch()
+
+        full_btn = QPushButton("Advanced Debugger", bar)
+        full_btn.setToolTip("Open the full debugger panel with watches and config")
+        full_btn.setFixedHeight(28)
+        full_btn.setStyleSheet(
+            f"QPushButton {{ color: {CS_TEXT}; background: {CS_SURFACE}; "
+            f"border: 1px solid {CS_ACCENT_SOFT}; border-radius: 4px; padding: 0 12px; }}"
+            f"QPushButton:hover {{ background: {CS_ACCENT_SOFT}; color: #FFFFFF; }}"
+        )
+        full_btn.clicked.connect(self._on_debug_tab_clicked)
+        layout.addWidget(full_btn)
+
+        return bar
+
+    def start_cp_debugging(self):
+        """Start a CircuitPython debug session. Shows the inline debug bar
+        and delegates to the debugger panel for instrumentation."""
+        # Kick the debugger panel's start flow (handles drive/REPL checks,
+        # instrumentation, and serial start sequence).
+        self.debugger_panel._on_start_clicked()
+        if self.debugger_panel._debugger_running:
+            self._debug_bar.setVisible(True)
+            self._dbg_status_label.setText("Debugging")
+            self._dbg_status_label.setStyleSheet(
+                f"color: {CS_ACCENT}; font-weight: bold; padding-right: 8px;"
+            )
+            self.repl_panel._debug_mode = True
+
+    def _cp_dbg_run(self):
+        """Continue with visual line tracking (CW)."""
+        self.debugger_panel._on_continue_log()
+
+    def _cp_dbg_step(self):
+        """Step one line."""
+        self.debugger_panel._on_step()
+
+    def _cp_dbg_restart(self):
+        """Restart the debug session from the top."""
+        self.debugger_panel._on_restart()
+
+    def _cp_dbg_stop(self):
+        """Stop the debug session and hide the inline bar."""
+        self.debugger_panel._on_stop()
+        self._debug_bar.setVisible(False)
+        self._clear_all_debug_highlights()
+        self.repl_panel._debug_mode = False
+
+    def highlight_debug_line(self, filename, line_number):
+        """Highlight the executing line in the editor tab."""
+        if not filename or not line_number:
+            return
+        target_base = os.path.basename(filename)
+
+        # Find the open tab whose file matches by basename.
+        match_widget = None
+        for i in range(self.editor_tab_widget.count()):
+            w = self.editor_tab_widget.widget(i)
+            cf = getattr(w, "current_file", None) or getattr(w, "_file_path", None)
+            if cf and os.path.basename(cf) == target_base:
+                match_widget = w
+                self.editor_tab_widget.setCurrentIndex(i)
+                break
+
+        # If not open, try to open it from the board drive.
+        if match_widget is None and self._board_drive:
+            path = os.path.join(self._board_drive, filename)
+            if os.path.isfile(path):
+                self._open_file(path)
+                match_widget = self.editor_tab_widget.currentWidget()
+
+        if match_widget is None or not hasattr(match_widget, "qpart"):
+            return
+
+        qpart = match_widget.qpart
+        block = qpart.document().findBlockByNumber(max(0, line_number - 1))
+        if not block.isValid():
+            return
+        cursor = qpart.textCursor()
+        cursor.setPosition(block.position())
+        qpart.setTextCursor(cursor)
+        qpart.ensureCursorVisible()
+
+        # Paint a highlight bar on the stopped line using qutepart's
+        # setExtraSelections (takes (absolutePosition, length) tuples).
+        try:
+            fmt = QTextCharFormat()
+            fmt.setBackground(QColor("#1a3a5c"))  # blue debug bar
+            fmt.setProperty(QTextCharFormat.Property.FullWidthSelection, True)
+            qpart._userExtraSelectionFormat = fmt
+            length = max(1, block.length() - 1)
+            qpart.setExtraSelections([(block.position(), length)])
+            self._debug_highlight_editor = qpart
+        except Exception:
+            pass
+
+    def _clear_all_debug_highlights(self):
+        """Remove the debug line highlight from any editor."""
+        ed = getattr(self, "_debug_highlight_editor", None)
+        if ed is not None:
+            try:
+                ed.setExtraSelections([])
+            except Exception:
+                pass
+            self._debug_highlight_editor = None
+
+    def update_debug_info(self, filename: str, line_num: int, watches: dict):
+        """Update the inline debug bar with current file:line and watch values."""
+        if hasattr(self, '_dbg_line_label'):
+            self._dbg_line_label.setText(f"{filename}:{line_num}")
+        if hasattr(self, '_dbg_watches_label') and watches:
+            parts = [f"{k} = {v}" for k, v in watches.items()]
+            self._dbg_watches_label.setText("  |  ".join(parts))
+        elif hasattr(self, '_dbg_watches_label'):
+            self._dbg_watches_label.setText("")
 
     def _on_repl_tab_clicked(self):
         """REPL tab button: switch to REPL and give it keyboard focus so keys
@@ -468,17 +711,19 @@ class CircuitStudioEditor(QWidget):
         self.repl_panel.setFocus()
 
     def _on_debug_tab_clicked(self):
-        """Debug tab button: show debugger panel and pass drive/repl refs."""
-        self.bottom_panel.setVisible(True)
+        """Toggle the advanced debugger side panel (config + watch values)."""
         self.debugger_panel.set_repl(self.repl_panel)
         if self._board_drive:
             self.debugger_panel.set_drive(self._board_drive)
-        self._switch_bottom_tab(2)
+        visible = self._debug_side_panel.isVisible()
+        self._debug_side_panel.setVisible(not visible)
+        if not visible:
+            self.central_splitter.setSizes([220, 600, 350])
 
     def _on_camera_tab_clicked(self):
         """Camera tab button: show the live camera panel."""
         self.bottom_panel.setVisible(True)
-        self._switch_bottom_tab(3)
+        self._switch_bottom_tab(2)
 
     def _on_repl_clear(self):
         """Clear the REPL output."""
@@ -492,8 +737,7 @@ class CircuitStudioEditor(QWidget):
         _inactive = f"QPushButton {{ background: transparent; color: #aaa; border: none; padding: 4px 14px; border-radius: 3px; }} QPushButton:hover {{ background: #2a2a4a; color: #fff; }}"
         self.repl_tab_btn.setStyleSheet(_active   if index == 0 else _inactive)
         self.plotter_tab_btn.setStyleSheet(_active if index == 1 else _inactive)
-        self.debug_tab_btn.setStyleSheet(_active  if index == 2 else _inactive)
-        self.camera_tab_btn.setStyleSheet(_active if index == 3 else _inactive)
+        self.camera_tab_btn.setStyleSheet(_active if index == 2 else _inactive)
 
     def _update_repl_btn(self, connected: bool):
         """Update REPL tab button text to reflect connection state."""
@@ -843,6 +1087,10 @@ class CircuitStudioEditor(QWidget):
                 self.on_save()
         if widget and hasattr(widget, 'qpart'):
             self.debugger_panel.uninstall_gutter(widget.qpart)
+            try:
+                widget.qpart.terminate()
+            except Exception:
+                pass
         self.editor_tab_widget.removeTab(idx)
         # removeTab does not destroy the widget. Without this, every closed tab
         # leaks an EditorWidget whose autosave QTimer keeps firing forever.
@@ -859,6 +1107,21 @@ class CircuitStudioEditor(QWidget):
         path = self.fileSystemModel.filePath(source_idx)
         if os.path.isfile(path):
             self._open_file(path)
+
+    def _open_untitled_tab(self, content: str, title: str = "Untitled"):
+        """Open a new editor tab with the given content (no file on disk).
+        Used by snippets to show complete samples in their own tab."""
+        editor = EditorWidget()
+        editor.qpart.setPlainText(content)
+        try:
+            editor.qpart.detectSyntax(language='Python')
+        except Exception:
+            pass
+        editor._file_path = None
+        editor.current_file = None
+        editor._modified = False
+        idx = self.editor_tab_widget.addTab(editor, title)
+        self.editor_tab_widget.setCurrentIndex(idx)
 
     def _open_file(self, path: str):
         norm_path = os.path.normcase(os.path.abspath(path))
@@ -991,10 +1254,9 @@ class CircuitStudioEditor(QWidget):
                 os.rename(path, new_path)
             if os.path.normpath(path) == os.path.normpath(self.current_project_directory or ""):
                 self._open_project(new_path)
-            elif hasattr(self, '_file_path') and self._file_path == path:
-                self._file_path = new_path
-                self.window.setWindowTitle(f"RV Circuit Studio - {new_name}")
-            self.window.statusBar().showMessage(f"Renamed {old_name} → {new_name}", 2000)
+            # Repoint all open tabs whose file lived at or under the old path.
+            self._repoint_open_tabs(path, new_path)
+            self.window.statusBar().showMessage(f"Renamed {old_name} -> {new_name}", 2000)
         except Exception as e:
             QMessageBox.critical(self.window, "Rename Error", str(e))
 
@@ -1014,10 +1276,9 @@ class CircuitStudioEditor(QWidget):
                 shutil.rmtree(path)
             else:
                 os.remove(path)
-            if hasattr(self, '_file_path') and self._file_path == path:
-                self._file_path = None
-                self.editor.setPlainText("")
-                self.window.setWindowTitle("RV Circuit Studio")
+            # Close any open tabs whose files lived at or under the deleted
+            # path so a later save can't silently recreate the deleted file.
+            self._close_tabs_under_path(path)
             self.window.statusBar().showMessage(f"Deleted {name}", 2000)
         except Exception as e:
             QMessageBox.critical(self.window, "Delete Error", str(e))
@@ -1121,12 +1382,25 @@ class CircuitStudioEditor(QWidget):
                 w.qpart.zoom_level = font_size
                 w.qpart.set_zoom_font()
 
+    def apply_ui_font_size(self, size: int):
+        self.repl_panel.set_font_size(size)
+        font_css = f"font-size: {size}pt;"
+        self.fileView.setStyleSheet(f"QTreeView {{ {font_css} }}")
+        if hasattr(self, 'snippet_manager') and self.snippet_manager:
+            self.snippet_manager.tree_widget.setStyleSheet(f"QTreeWidget {{ {font_css} }}")
+        self.bottom_panel.setStyleSheet(
+            f"QTabWidget::pane {{ border-top: 1px solid {CS_ACCENT_SOFT}; }}\n"
+            f"QTabBar::tab {{ {font_css} }}"
+        )
+
     def show_settings(self):
         dlg = SettingsDialog(self.window)
         dlg.exec()
         config = self._load_config()
         font_size = int(config.get("editor", {}).get("font_size", 10))
         self.apply_font_size_to_all_tabs(font_size)
+        ui_font_size = int(config.get("ui", {}).get("font_size", 10))
+        self.apply_ui_font_size(ui_font_size)
 
     def show_find_replace_dialog(self):
         idx = self.editor_tab_widget.currentIndex()
@@ -1141,11 +1415,62 @@ class CircuitStudioEditor(QWidget):
         from .app import CONFIG_FILE
         if os.path.exists(CONFIG_FILE):
             try:
-                with open(CONFIG_FILE, 'r') as f:
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                     return json.load(f)
             except Exception:
                 pass
         return {}
+
+    def _repoint_open_tabs(self, old_path: str, new_path: str):
+        """After a rename, update every open tab whose file lived at or under
+        old_path so that future saves go to the new location."""
+        old_norm = os.path.normcase(os.path.abspath(old_path))
+        sep = os.sep
+        for i in range(self.editor_tab_widget.count()):
+            w = self.editor_tab_widget.widget(i)
+            fp = getattr(w, '_file_path', None) or getattr(w, 'current_file', None)
+            if not fp:
+                continue
+            fp_norm = os.path.normcase(os.path.abspath(fp))
+            if fp_norm == old_norm:
+                # Exact match (file renamed directly)
+                w._file_path = new_path
+                w.current_file = new_path
+                self.editor_tab_widget.setTabText(i, os.path.basename(new_path))
+            elif fp_norm.startswith(old_norm + sep):
+                # Child of a renamed folder
+                rel = fp[len(old_path):]
+                updated = new_path + rel
+                w._file_path = updated
+                w.current_file = updated
+                # Tab title (filename) doesn't change for folder renames.
+
+    def _close_tabs_under_path(self, path: str):
+        """After a delete, close every open tab whose file lived at or under
+        path. Iterate from the end so indices don't shift."""
+        norm = os.path.normcase(os.path.abspath(path))
+        sep = os.sep
+        for i in range(self.editor_tab_widget.count() - 1, -1, -1):
+            w = self.editor_tab_widget.widget(i)
+            fp = getattr(w, '_file_path', None) or getattr(w, 'current_file', None)
+            if not fp:
+                continue
+            fp_norm = os.path.normcase(os.path.abspath(fp))
+            if fp_norm == norm or fp_norm.startswith(norm + sep):
+                if w and hasattr(w, 'qpart'):
+                    self.debugger_panel.uninstall_gutter(w.qpart)
+                    try:
+                        w.qpart.terminate()
+                    except Exception:
+                        pass
+                if hasattr(w, 'autosave_timer'):
+                    try:
+                        w.autosave_timer.stop()
+                    except Exception:
+                        pass
+                self.editor_tab_widget.removeTab(i)
+                if w is not None:
+                    w.deleteLater()
 
     def save_editor_state(self):
         pass  # Extend later to persist open tabs

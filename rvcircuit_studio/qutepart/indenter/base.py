@@ -47,7 +47,7 @@ class IndentAlgBase(IndentAlgNone):
         Implementation might return self._prevNonEmptyBlockIndent(), if doesn't have
         any ideas, how to indent text better
         """
-        raise NotImplemented()
+        raise NotImplementedError()
 
     def _qpartIndent(self):
         """Return text previous block, which is non empty (contains something, except spaces)

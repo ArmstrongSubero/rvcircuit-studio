@@ -49,8 +49,15 @@ class _GlobalUpdateWordSetTimer:
             self._timer.stop()
 
     def _onTimer(self):
+        if not self._scheduledMethods:
+            return
         method = self._scheduledMethods.pop()
-        method()
+        try:
+            method()
+        except Exception:
+            # A method bound to a destroyed editor must not break
+            # completion for all other editors.
+            pass
         if self._scheduledMethods:
             self._timer.start(self._IDLE_TIMEOUT_MS)
 

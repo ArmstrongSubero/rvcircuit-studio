@@ -87,7 +87,7 @@ class IndentAlgPython(IndentAlgBase):
             'foo': 'bar',
         }
         """
-        if lineStripped.endswith('{['):
+        if lineStripped.endswith(('{', '[')):
             return self._increaseIndent(self._blockIndent(block))
 
         return self._blockIndent(block)

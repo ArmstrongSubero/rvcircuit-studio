@@ -36,7 +36,7 @@ class CodeEditorWindow(Qutepart):
             import json as _j
             _p = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "circuit_studio_config.json")
             if os.path.exists(_p):
-                with open(_p) as _f:
+                with open(_p, encoding='utf-8') as _f:
                     self.zoom_level = int(_j.load(_f).get("editor", {}).get("font_size", 10))
             else:
                 self.zoom_level = 10
@@ -119,13 +119,17 @@ class CodeEditorWindow(Qutepart):
             _p = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "circuit_studio_config.json")
             os.makedirs(os.path.dirname(_p), exist_ok=True)
             if os.path.exists(_p):
-                with open(_p) as _f:
+                with open(_p, encoding='utf-8') as _f:
                     cfg = _j.load(_f)
             else:
                 cfg = {}
             cfg.setdefault("editor", {})["font_size"] = self.zoom_level
-            with open(_p, "w") as _f:
+            _tmp = _p + ".tmp"
+            with open(_tmp, "w", encoding='utf-8') as _f:
                 _j.dump(cfg, _f, indent=2)
+                _f.flush()
+                os.fsync(_f.fileno())
+            os.replace(_tmp, _p)
         except Exception:
             pass
 
@@ -300,6 +304,7 @@ class EditorWidget(QWidget):
         # format. _error_sel holds the current red error line (or None); word
         # matches are recomputed on selection change and rendered together.
         self._error_sel = None          # (start, length) or None
+        self._debug_sel = None
         self._word_match_re = None
         self.qpart.selectionChanged.connect(self._on_selection_changed)
 
@@ -376,10 +381,6 @@ class EditorWidget(QWidget):
         self._render_extra_selections()
 
     def _render_extra_selections(self):
-        """Push the combined highlight set (word matches + error line) to
-        qutepart. qutepart applies one shared format to all entries, so when
-        word matches are present we use the word colour; otherwise the error
-        colour is used for the error line."""
         from PySide6.QtGui import QColor, QTextCharFormat
 
         sels = []
@@ -392,11 +393,20 @@ class EditorWidget(QWidget):
             fmt = QTextCharFormat()
             fmt.setBackground(QColor("#3a4a2a"))   # subtle olive, like Mu
             self.qpart._userExtraSelectionFormat = fmt
-            # If an error line exists, keep it visible too (same format; the
-            # error line is rarely active while word-hunting).
             if self._error_sel is not None:
                 sels.append(self._error_sel)
+            if self._debug_sel is not None:
+                sels.append(self._debug_sel)
             self.qpart.setExtraSelections(sels)
+        elif self._debug_sel is not None:
+            fmt = QTextCharFormat()
+            fmt.setBackground(QColor("#1a3a5c"))   # blue debug tint
+            fmt.setForeground(QColor("#58a6ff"))
+            self.qpart._userExtraSelectionFormat = fmt
+            extra = [self._debug_sel]
+            if self._error_sel is not None:
+                extra.append(self._error_sel)
+            self.qpart.setExtraSelections(extra)
         elif self._error_sel is not None:
             fmt = QTextCharFormat()
             fmt.setBackground(QColor("#3d1a1a"))
@@ -426,6 +436,26 @@ class EditorWidget(QWidget):
         self._error_sel = None
         self._render_extra_selections()
 
+    def highlight_debug_line(self, line_number: int):
+        """Highlight executing line during debug."""
+        doc = self.qpart.document()
+        block = doc.findBlockByLineNumber(line_number - 1)
+        if not block.isValid():
+            return
+        start = block.position()
+        length = max(block.length() - 1, 1)
+        self._debug_sel = (start, length)
+        self._render_extra_selections()
+        cursor = self.qpart.textCursor()
+        cursor.setPosition(start)
+        self.qpart.setTextCursor(cursor)
+        self.qpart.ensureCursorVisible()
+
+    def clear_debug_highlight(self):
+        """Clear debug highlight."""
+        self._debug_sel = None
+        self._render_extra_selections()
+
     def get_text(self):
         return self.qpart.toPlainText()
 
@@ -438,8 +468,8 @@ class EditorWidget(QWidget):
 
     def saveFile(self):
         try:
-            with open(self.current_file, 'w', encoding='utf-8') as file:
-                file.write(self.get_text())
+            from .circuitpython_mode import safe_write
+            safe_write(self.current_file, self.get_text())
             self._modified = False  # Reset the modified flag
         except Exception:
             # File may be gone or unwritable (e.g. board ejected mid-edit).

@@ -68,8 +68,15 @@ class ToolbarManager:
         self.toggle_repl_action.setToolTip("Toggle REPL Terminal")
         self.toggle_repl_action.setCheckable(True)
 
+        self.toggle_debug_panel_action = QAction("D", self.toolbar)
+        self.toggle_debug_panel_action.setToolTip("Toggle Debug Panel (watches, config)")
+        self.toggle_debug_panel_action.setCheckable(True)
+
         self.run_action = QAction(_icon("run.png"), "Run (Save to Board)", self.toolbar)
         self.run_action.setToolTip("Save code.py to CIRCUITPY drive - board auto-reloads")
+
+        self.start_debug_action = QAction(_icon("debug_start.png"), "Start Debugging", self.toolbar)
+        self.start_debug_action.setToolTip("Start a step-through debug session on the board")
 
         self.format_action = QAction("{ }", self.toolbar)
         self.format_action.setToolTip("Format code with Black")
@@ -154,9 +161,11 @@ class ToolbarManager:
         self.toolbar.addAction(self.toggle_snippets_action)
         self.toolbar.addAction(self.toggle_editor_action)
         self.toolbar.addAction(self.toggle_repl_action)
+        self.toolbar.addAction(self.toggle_debug_panel_action)
         self.toolbar.addSeparator()
 
         self.toolbar.addAction(self.run_action)
+        self.toolbar.addAction(self.start_debug_action)
         self.toolbar.addAction(self.format_action)
         self.toolbar.addAction(self.plotter_action)
         self.toolbar.addAction(self.libraries_action)
@@ -196,8 +205,10 @@ class ToolbarManager:
         self.toggle_snippets_action.triggered.connect(self.editor.toggle_snippets_bottom)
         self.toggle_editor_action.triggered.connect(self.editor.toggle_editor_tab)
         self.toggle_repl_action.triggered.connect(self.editor.toggle_terminal)
+        self.toggle_debug_panel_action.triggered.connect(self.editor._on_debug_tab_clicked)
 
         self.run_action.triggered.connect(self.editor.run_on_board)
+        self.start_debug_action.triggered.connect(self.editor.start_cp_debugging)
         self.format_action.triggered.connect(self.editor.format_code)
         self.serial_action.triggered.connect(self.editor.toggle_serial)
         self.plotter_action.triggered.connect(self.editor.toggle_plotter)

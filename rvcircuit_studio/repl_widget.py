@@ -51,7 +51,7 @@ def _decode_keep_incomplete(buf: bytes):
         if e.end >= len(buf) and e.start < len(buf):
             good = buf[:e.start].decode("utf-8", errors="replace")
             return good, buf[e.start:]
-        # Otherwise it's genuinely bad data mid-stream: replace and flush.
+        # Otherwise it's bad data mid-stream: replace and flush.
         return buf.decode("utf-8", errors="replace"), b""
 
 
@@ -96,6 +96,8 @@ class REPLWidget(QTextEdit):
 
         font = _resolve_mono_font(10)
         self.setFont(font)
+        self.document().setDefaultFont(font)
+        self._mono_font = font
 
         palette = self.palette()
         from PySide6.QtGui import QPalette
@@ -116,9 +118,27 @@ class REPLWidget(QTextEdit):
         self._cur_fg     = _DEFAULT_FG
         self._cur_bold   = False
         self._paste_mode = False
+        self._debug_mode = False
+        self._alt_screen = False
 
         self._append_system("RV Circuit Studio - CircuitPython REPL")
         self._append_system("Connect a CircuitPython board to get started.")
+
+    def set_font_size(self, size: int):
+        font = _resolve_mono_font(size)
+        self._mono_font = font
+        self._mono_size = size
+        self.setFont(font)
+        self.document().setDefaultFont(font)
+        # Reformat all existing text
+        cursor = self.textCursor()
+        cursor.select(QTextCursor.SelectionType.Document)
+        fmt = QTextCharFormat()
+        fmt.setFontPointSize(size)
+        fmt.setFontFamilies([font.family()])
+        cursor.mergeCharFormat(fmt)
+        cursor.clearSelection()
+        self.setTextCursor(cursor)
 
     def connect(self, port: str, baud: int = 115200):
         if not HAS_SERIAL:
@@ -240,8 +260,10 @@ class REPLWidget(QTextEdit):
                 text = text.replace("\r\n", "\n").replace("\r", "\n")
                 if not text:
                     return
-                self._process_vt100(text)
+                # Always emit raw text to the debugger panel / plotter.
                 self.data_received.emit(text)
+                if not self._debug_mode:
+                    self._process_vt100(text)
         except Exception as e:
             self._append_error(f"Read error: {e}")
             self.disconnect()
@@ -336,6 +358,7 @@ class REPLWidget(QTextEdit):
         if not text:
             return
         fmt = QTextCharFormat()
+        fmt.setFont(self._mono_font)
         fmt.setForeground(QColor(self._cur_fg))
         if self._cur_bold:
             fmt.setFontWeight(QFont.Weight.Bold)
@@ -348,6 +371,7 @@ class REPLWidget(QTextEdit):
         cursor = self.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         fmt = QTextCharFormat()
+        fmt.setFont(self._mono_font)
         fmt.setForeground(QColor(CS_ACCENT))
         fmt.setFontItalic(True)
         cursor.mergeCharFormat(fmt)
@@ -359,8 +383,31 @@ class REPLWidget(QTextEdit):
         cursor = self.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         fmt = QTextCharFormat()
+        fmt.setFont(self._mono_font)
         fmt.setForeground(QColor(CS_DANGER))
         cursor.mergeCharFormat(fmt)
         cursor.insertText(text + "\n")
         self.setTextCursor(cursor)
         self.ensureCursorVisible()
+
+    def _filter_debug_noise(self, text: str) -> str:
+        """Strip debug protocol noise from display."""
+        import re as _re
+        # Strip alternate screen buffer blocks (the debug JSON).
+        text = _re.sub(r'\x1b\[\?1049h.*?\x1b\[\?1049l', '', text, flags=_re.DOTALL)
+        # Strip protocol signals.
+        text = text.replace('[S]', '').replace('[CW]', '').replace('[CO]', '')
+        # Strip debug session markers.
+        text = text.replace('==== Start Debugging ====', '')
+        text = text.replace('==== End Debugging ====', '')
+        # Strip the debug import command.
+        text = _re.sub(r'from ide_debug_\w+ import \*', '', text)
+        # Strip Ctrl-C/Ctrl-D echo artifacts.
+        text = text.replace('\x03', '').replace('\x04', '')
+        # Collapse all blank lines and leading/trailing whitespace.
+        text = _re.sub(r'\n\s*\n', '\n', text)
+        text = text.strip()
+        # If nothing meaningful remains, return empty.
+        if not text or text == '>>>' or text == '>>> ':
+            return ''
+        return text

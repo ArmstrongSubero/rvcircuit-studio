@@ -49,28 +49,32 @@ class SnippetManager:
         snippet_code = item.data(0, Qt.UserRole)
         if not snippet_code:
             return
+        snippet_name = item.text(0) or "Snippet"
+
+        # context as a complete sample, rather than inserting a fragment
+        try:
+            from .editor_ui import EditorWidget
+            editor = EditorWidget()
+            content = f"# Example: {snippet_name}\n\n{snippet_code}\n"
+            editor.qpart.setPlainText(content)
+            try:
+                editor.qpart.detectSyntax(language='Python')
+            except Exception:
+                pass
+            editor._file_path = None
+            editor.current_file = None
+            editor._modified = False
+            idx = self.editor.addTab(editor, f"Example: {snippet_name}")
+            self.editor.setCurrentIndex(idx)
+            return
+        except Exception:
+            pass
         current_widget = self.editor.currentWidget()
         if current_widget is None or not hasattr(current_widget, "qpart"):
-            return  # no editor tab open to insert into
+            return
         current_editor = current_widget.qpart
         cursor = current_editor.textCursor()
-
-        block = cursor.block()
-        line_text = block.text()
-        indent = ""
-        for ch in line_text:
-            if ch in (' ', '\t'):
-                indent += ch
-            else:
-                break
-
-        lines = snippet_code.split('\n')
-        if len(lines) > 1:
-            indented = lines[0] + '\n' + '\n'.join(indent + l if l.strip() else l for l in lines[1:])
-        else:
-            indented = lines[0]
-
-        cursor.insertText(indented)
+        cursor.insertText(snippet_code)
 
     def create_snippets_tree(self, snippet_file=None):
         snippet_file = snippet_file or self.SNIPPET_FILENAME
@@ -113,16 +117,29 @@ class SnippetManager:
                 snippet_code = snippet_item.data(0, Qt.UserRole)
                 snippets_data[snippet_name] = snippet_code
             data[category_name] = snippets_data
-        with open(self.SNIPPET_FILENAME, 'w') as f:
-            json.dump(data, f)
+        tmp_path = self.SNIPPET_FILENAME + ".tmp"
+        try:
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.SNIPPET_FILENAME)
+        except Exception:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
     def load_snippets_from_file(self, snippet_file=None):
         snippet_file = snippet_file or self.SNIPPET_FILENAME
         if not os.path.exists(snippet_file):
             return None
-        with open(snippet_file, 'r') as file:
-            data = json.load(file)
-        return data
+        try:
+            with open(snippet_file, 'r', encoding='utf-8') as file:
+                data = json.load(file)
+            return data
+        except Exception:
+            return None
 
     def show_snippet_context_menu(self, position):
         item = self.tree_widget.itemAt(position)

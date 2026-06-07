@@ -18,7 +18,7 @@ def _load_config():
     from .app import CONFIG_FILE
     if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG_FILE, "r") as f:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             pass
@@ -27,11 +27,18 @@ def _load_config():
 def _save_config(config):
     from .app import CONFIG_FILE, DATA_DIR
     os.makedirs(DATA_DIR, exist_ok=True)
+    tmp_path = CONFIG_FILE + ".tmp"
     try:
-        with open(CONFIG_FILE, "w") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, CONFIG_FILE)
     except Exception:
-        pass
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
 
 class SettingsDialog(QDialog):
     """Circuit Studio Settings - Editor, Workspace, Board."""
@@ -71,9 +78,14 @@ class SettingsDialog(QDialog):
         editor = self.config.get("editor", {})
 
         self.font_size_spin = QSpinBox()
-        self.font_size_spin.setRange(8, 24)
+        self.font_size_spin.setRange(8, 32)
         self.font_size_spin.setValue(editor.get("font_size", 10))
-        form.addRow("Font Size:", self.font_size_spin)
+        form.addRow("Editor Font Size:", self.font_size_spin)
+
+        self.ui_font_size_spin = QSpinBox()
+        self.ui_font_size_spin.setRange(8, 32)
+        self.ui_font_size_spin.setValue(self.config.get("ui", {}).get("font_size", 10))
+        form.addRow("UI Font Size:", self.ui_font_size_spin)
 
         self.tab_width_spin = QSpinBox()
         self.tab_width_spin.setRange(2, 8)
@@ -168,6 +180,9 @@ class SettingsDialog(QDialog):
         })
         self.config["workspace_directory"] = self.workspace_input.text()
         self.config["restore_last"]        = self.restore_check.isChecked()
+        self.config.setdefault("ui", {}).update({
+            "font_size": self.ui_font_size_spin.value(),
+        })
         self.config.setdefault("board", {}).update({
             "filename":     self.filename_combo.currentText(),
             "auto_connect": self.auto_connect_check.isChecked(),

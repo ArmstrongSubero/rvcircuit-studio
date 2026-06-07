@@ -28,7 +28,7 @@ def _cmpFormatRanges(a, b):
        a.length == b.length:
         return 0
     else:
-        return cmp(id(a), id(b))
+        return (id(a) > id(b)) - (id(a) < id(b))
 
 
 def _formatRangeListsEqual(a, b):

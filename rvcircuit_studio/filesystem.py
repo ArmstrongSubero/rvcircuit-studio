@@ -57,6 +57,9 @@ class WorkspaceFilterProxy(QSortFilterProxyModel):
         if name.startswith(".") or name in self._HIDDEN_NAMES:
             return False
 
+        if name.startswith("ide_debug_") and name.endswith(".py"):
+            return False
+
         if self._filter_parent and self._filter_name:
             parent_path = os.path.normpath(os.path.dirname(file_path))
             if parent_path == self._filter_parent:

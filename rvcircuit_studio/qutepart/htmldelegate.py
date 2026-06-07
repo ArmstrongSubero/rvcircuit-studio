@@ -42,9 +42,15 @@ class HTMLDelegate(QStyledItemDelegate):
 
             style = QApplication.style() if options.widget is None else options.widget.style()
 
+            # Read the HTML from the model, not from options.text which may
+            # be empty in some PySide6 builds (Bug 28).
+            html = index.data(0)  # Qt.ItemDataRole.DisplayRole == 0
+            if not html:
+                html = options.text or ""
+
             doc = QTextDocument()
             doc.setDocumentMargin(1)
-            doc.setHtml(options.text)
+            doc.setHtml(html)
             if options.widget is not None:
                 doc.setDefaultFont(options.widget.font())
 
@@ -53,9 +59,19 @@ class HTMLDelegate(QStyledItemDelegate):
 
             ctx = QAbstractTextDocumentLayout.PaintContext()
 
-            # Highlighting text if item is selected
+            # Bug 29: on dark themes unselected rows were invisible because
+            # only the selected row had its colour set. Paint an explicit
+            # selection bar and set text colour for both states.
             if option.state & QStyle.State_Selected:
-                ctx.palette.setColor(QPalette.ColorRole.Text, option.palette.color(QPalette.ColorGroup.Active, QPalette.ColorRole.HighlightedText))
+                ctx.palette.setColor(
+                    QPalette.ColorRole.Text,
+                    option.palette.color(QPalette.ColorGroup.Active,
+                                         QPalette.ColorRole.HighlightedText))
+            else:
+                ctx.palette.setColor(
+                    QPalette.ColorRole.Text,
+                    option.palette.color(QPalette.ColorGroup.Active,
+                                         QPalette.ColorRole.Text))
 
             textRect = style.subElementRect(QStyle.SE_ItemViewItemText, options)
             painter.save()
@@ -72,9 +88,14 @@ class HTMLDelegate(QStyledItemDelegate):
         options = QStyleOptionViewItem(option)
         self.initStyleOption(options,index)
 
+        # Read from model, not options.text (Bug 28).
+        html = index.data(0)
+        if not html:
+            html = options.text or ""
+
         doc = QTextDocument()
         doc.setDocumentMargin(1)
         #  bad long (multiline) strings processing doc.setTextWidth(options.rect.width())
-        doc.setHtml(options.text)
+        doc.setHtml(html)
         return QSize(int(doc.idealWidth()),
-                     int(QStyledItemDelegate.sizeHint(self, option, index).height()))
+                     int(doc.size().height()))

@@ -42,7 +42,7 @@ def get_data_dir():
 def _load_config():
     if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG_FILE, "r") as f:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             pass
@@ -50,62 +50,52 @@ def _load_config():
 
 def _save_config(config):
     os.makedirs(DATA_DIR, exist_ok=True)
+    tmp_path = CONFIG_FILE + ".tmp"
     try:
-        with open(CONFIG_FILE, "w") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, CONFIG_FILE)
     except Exception:
-        pass
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
 
 def _load_or_setup(app):
     config = _load_config()
 
     workspace = config.get("workspace_directory", "").strip()
     if not workspace or not os.path.isdir(workspace):
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(
+            None,
+            "Welcome to RV Circuit Studio",
+            "Pick a folder to keep backups of your code.\n\n"
+            "Your code runs on the board (CIRCUITPY drive).\n"
+            "Every time you hit Run, a copy is backed up\n"
+            "here automatically.\n\n"
+            "You can change this in Settings."
+        )
         workspace = QFileDialog.getExistingDirectory(
             None,
-            "Select Workspace - RV Circuit Studio will save your CircuitPython projects here"
+            "Select Backup Folder"
         )
         if not workspace:
-            workspace = os.path.join(os.path.expanduser("~"), "CircuitStudioWorkspace")
+            workspace = os.path.join(os.path.expanduser("~"), "CircuitStudioBackups")
         os.makedirs(workspace, exist_ok=True)
         config["workspace_directory"] = workspace
+        config["last_project_directory"] = workspace
         _save_config(config)
 
     last_dir = config.get("last_project_directory", "").strip()
     if last_dir and os.path.isdir(last_dir) and config.get("restore_last", True):
         return last_dir
 
-    from PySide6.QtWidgets import QInputDialog
-    project_name, ok = QInputDialog.getText(
-        None, "New Project", "Project name:", text="MyProject"
-    )
-    if not ok or not project_name.strip():
-        project_name = "MyProject"
-    project_name = project_name.strip()
-    project_dir  = os.path.join(workspace, project_name)
-    os.makedirs(project_dir, exist_ok=True)
-
-    starter = os.path.join(project_dir, "code.py")
-    if not os.path.exists(starter):
-        with open(starter, "w", encoding="utf-8") as f:
-            f.write(
-                "# code.py - CircuitPython Starter\n"
-                "# RV Circuit Studio\n\n"
-                "import board\n"
-                "import digitalio\n"
-                "import time\n\n"
-                "led = digitalio.DigitalInOut(board.LED)\n"
-                "led.direction = digitalio.Direction.OUTPUT\n\n"
-                "while True:\n"
-                "    led.value = True\n"
-                "    time.sleep(0.5)\n"
-                "    led.value = False\n"
-                "    time.sleep(0.5)\n"
-            )
-
-    config["last_project_directory"] = project_dir
+    config["last_project_directory"] = workspace
     _save_config(config)
-    return project_dir
+    return workspace
 
 def _create_splash():
     from PySide6.QtGui import QPainter, QLinearGradient
@@ -238,9 +228,37 @@ def main():
 
     def on_close(event):
         editor.save_editor_state()
+        # Stop the board-detection polling thread so it doesn't fire after
+        # widgets are destroyed.
+        try:
+            editor.board_watcher.stop()
+        except Exception:
+            pass
+        # Disconnect the serial REPL so the COM port is released immediately
+        # (on Windows, the port stays locked until the process fully exits).
+        try:
+            if hasattr(editor, 'repl_panel') and editor.repl_panel.is_connected:
+                editor.repl_panel.disconnect()
+        except Exception:
+            pass
+        # Stop autosave timers on any open tabs.
+        try:
+            for i in range(editor.editor_tab_widget.count()):
+                w = editor.editor_tab_widget.widget(i)
+                if hasattr(w, 'autosave_timer'):
+                    w.autosave_timer.stop()
+        except Exception:
+            pass
         try:
             if hasattr(editor, "camera_panel"):
                 editor.camera_panel.cleanup()
+        except Exception:
+            pass
+        try:
+            drive = getattr(editor, '_board_drive', None)
+            if drive and os.path.isdir(drive):
+                from .cp_debugger import cleanup_debug_files
+                cleanup_debug_files(drive)
         except Exception:
             pass
         config = _load_config()
@@ -256,7 +274,7 @@ def main():
 
     if os.path.exists(STATE_FILE):
         try:
-            with open(STATE_FILE, "r") as f:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
                 state = json.load(f)
             if state.get("window_maximized", True):
                 window.showMaximized()

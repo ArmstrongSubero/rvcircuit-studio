@@ -27,11 +27,10 @@ class IndentAlgRust(IndentAlgBase):
             else:
                 return self._computeSmartIndent(foundBlock, foundColumn)
 
-        # Indentation for match, if, else, loop, for, and while statements
-        if lineStripped in ('match', 'if', 'else', 'loop', 'for', 'while') or \
-           lineStripped.endswith('=>') or \
+        # Indentation for block-opening tokens
+        if lineStripped.endswith('=>') or \
            lineStripped.endswith('{'):
-            self.logger.debug("Indenting for match/if/else/loop/for/while/=>/{ statements")
+            self.logger.debug("Indenting for =>/{ block opener")
             return self._increaseIndent(self._blockIndent(block))
 
         # Handle multi-line comments
@@ -39,8 +38,18 @@ class IndentAlgRust(IndentAlgBase):
             self.logger.debug("Indenting for multi-line comments (start)")
             return self._increaseIndent(self._blockIndent(block))
         if lineStripped.endswith("*/"):
-            self.logger.debug("Un-indenting for multi-line comments (end)")
-            return self._decreaseIndent(self._blockIndent(block))
+            # Find the matching /* opener and align to its indent.
+            # Single-line /* ... */ keeps the current indent.
+            if lineStripped.startswith("/*"):
+                self.logger.debug("Single-line /* */ comment, keeping indent")
+                return self._blockIndent(block)
+            for prev in self.iterateBlocksBackFrom(block.previous()):
+                stripped = prev.text().strip()
+                if stripped.startswith("/*"):
+                    self.logger.debug("Aligning */ with opening /* at line %d" % prev.blockNumber())
+                    return self._blockIndent(prev)
+            self.logger.debug("No opening /* found, keeping indent")
+            return self._blockIndent(block)
 
         # Un-indenting after the '}' character
         if lineStripped == '}':

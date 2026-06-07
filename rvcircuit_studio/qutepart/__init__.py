@@ -997,7 +997,12 @@ class Qutepart(QPlainTextEdit):
         with self:
             cursor.insertBlock()
             if not atStartOfLine:  # if whole line is moved down - just leave it as is
-                self._indenter.autoIndentBlock(cursor.block())
+                try:
+                    self._indenter.autoIndentBlock(cursor.block())
+                except Exception:
+                    # Indenter failure degrades to "no indent this line"
+                    # instead of crashing the editor.
+                    pass
         self.ensureCursorVisible()
 
     def textBeforeCursor(self):
@@ -1124,7 +1129,12 @@ class Qutepart(QPlainTextEdit):
 
             if textTyped or \
             (event.key() == Qt.Key.Key_Backspace and self._completer.isVisible()):
-                self._completer.invokeCompletionIfAvailable()
+                try:
+                    self._completer.invokeCompletionIfAvailable()
+                except Exception:
+                    # Completer failure degrades to "no popup" instead of
+                    # crashing the editor.
+                    pass
 
         super(Qutepart, self).keyReleaseEvent(event)
 
@@ -1298,7 +1308,11 @@ class Qutepart(QPlainTextEdit):
         Draw indentation markers after main contents is drawn
         """
         super(Qutepart, self).paintEvent(event)
-        self._drawIndentMarkersAndEdge(event.rect())
+        try:
+            self._drawIndentMarkersAndEdge(event.rect())
+        except Exception:
+            # Decoration failure must never break the text paint.
+            pass
 
     def _currentLineExtraSelections(self):
         """QTextEdit.ExtraSelection, which highlightes current line

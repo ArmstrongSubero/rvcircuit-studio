@@ -224,13 +224,19 @@ class _ConfigPage(QWidget):
         """Rebuild the file checkbox list."""
         prev_checked = {n for n, cb in self._file_checkboxes.items() if cb.isChecked()}
 
-        for i in reversed(range(self._files_layout.count())):
-            w = self._files_layout.itemAt(i).widget()
+        while self._files_layout.count():
+            item = self._files_layout.takeAt(0)
+            w = item.widget()
             if w:
+                w.setParent(None)
                 w.deleteLater()
         self._file_checkboxes.clear()
 
+        seen = set()
         for name in sorted(filenames):
+            if name in seen:
+                continue
+            seen.add(name)
             cb = QCheckBox(name)
             cb.setStyleSheet(f"color: {CS_TEXT}; font-family: 'JetBrains Mono'; font-size: 10px;")
             cb.setChecked(name in prev_checked or name == "code.py")
@@ -275,42 +281,46 @@ class _DebugToolbar(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(32)
+        self.setFixedHeight(36)
         self.setStyleSheet(f"background: {CS_BG_TOOLBAR};")
         row = QHBoxLayout(self)
-        row.setContentsMargins(4, 0, 4, 0)
-        row.setSpacing(0)
+        row.setContentsMargins(6, 0, 6, 0)
+        row.setSpacing(4)
 
-        def _btn(label, tooltip, fg=CS_TEXT):
+        _TBTN = (
+            "QPushButton {{"
+            "  background: {bg}; color: {fg}; border: none;"
+            "  padding: 3px 10px; border-radius: 3px; font-size: 11px;"
+            "  font-weight: bold;"
+            "}}"
+            "QPushButton:hover {{ background: {hover}; }}"
+            "QPushButton:disabled {{ background: {CS_SURFACE}; color: {dis}; }}"
+        )
+
+        def _tbtn(label, tooltip, bg, fg="#fff", hover=None):
             b = QPushButton(label)
             b.setToolTip(tooltip)
-            b.setFixedSize(QSize(30, 28))
-            b.setStyleSheet(_btn_style(fg=fg))
+            if hover is None:
+                hover = bg
+            b.setStyleSheet(_TBTN.format(
+                bg=bg, fg=fg, hover=hover,
+                CS_SURFACE=CS_SURFACE, dis=_C_DISABLED
+            ))
             return b
 
-        self.btn_restart      = _btn("↺", "Restart debugger",            fg=_C_START)
-        self.btn_stop         = _btn("■", "Stop debugger",               fg=_C_STOP)
-        self.btn_step         = _btn("▶|","Step to next line",           fg=_C_STEP)
-        self.btn_cont_log     = _btn("▶▶","Continue + log (CW)",        fg=_C_STEP)
-        self.btn_cont         = _btn("▶","Continue without log (CO)",   fg=_C_STEP)
-        self.btn_rewind_all   = _btn("⏮", "Rewind to start of history", fg=_C_HIST)
-        self.btn_rewind       = _btn("◀", "Rewind one step",            fg=_C_HIST)
-        self.btn_forward      = _btn("▶", "Forward one step",           fg=_C_HIST)
-        self.btn_forward_all  = _btn("⏭", "Forward to latest",          fg=_C_HIST)
+        self.btn_run     = _tbtn("  Run",   "Run with visual line tracking",
+                                  CS_PRIMARY, hover="#2ea043")
+        self.btn_step    = _tbtn(" Step",  "Execute one line, then pause",
+                                  CS_ACCENT, fg=CS_BG_DEEP, hover="#79c0ff")
+        self.btn_restart = _tbtn("  Restart", "Restart from the top",
+                                  CS_SURFACE, fg=CS_TEXT, hover="#30363d")
+        self.btn_stop    = _tbtn("  Stop",   "Stop debugger and clean up",
+                                  CS_DANGER, hover="#da3633")
 
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setStyleSheet(f"color: #30363d;")
-
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.Shape.VLine)
-        sep2.setStyleSheet(f"color: #30363d;")
-
-        for w in [self.btn_restart, self.btn_stop, sep,
-                  self.btn_step, self.btn_cont_log, self.btn_cont, sep2,
-                  self.btn_rewind_all, self.btn_rewind,
-                  self.btn_forward, self.btn_forward_all]:
-            row.addWidget(w)
+        row.addWidget(self.btn_run)
+        row.addWidget(self.btn_step)
+        row.addWidget(self.btn_restart)
+        row.addWidget(self.btn_stop)
         row.addStretch()
 
         self._status = QLabel("Stopped")
@@ -328,12 +338,16 @@ class _DebugToolbar(QWidget):
         self.btn_restart.clicked.connect(self.sig_restart)
         self.btn_stop.clicked.connect(self.sig_stop)
         self.btn_step.clicked.connect(self.sig_step)
-        self.btn_cont_log.clicked.connect(self.sig_continue_log)
-        self.btn_cont.clicked.connect(self.sig_continue)
-        self.btn_rewind_all.clicked.connect(self.sig_rewind_all)
-        self.btn_rewind.clicked.connect(self.sig_rewind)
-        self.btn_forward.clicked.connect(self.sig_forward)
-        self.btn_forward_all.clicked.connect(self.sig_forward_all)
+        self.btn_run.clicked.connect(self.sig_continue_log)
+
+        # History nav signals still exist for programmatic use but
+        # ambiguous when there are side effects").
+        self.btn_cont_log    = self.btn_run    # alias for existing wiring
+        self.btn_cont        = self.btn_run
+        self.btn_rewind_all  = QPushButton()
+        self.btn_rewind      = QPushButton()
+        self.btn_forward     = QPushButton()
+        self.btn_forward_all = QPushButton()
 
     def set_status(self, text: str, color: str = CS_TEXT_MUTED):
         self._status.setText(text)
@@ -350,29 +364,11 @@ class _DebugToolbar(QWidget):
     def update_enabled(self, running: bool, halted: bool,
                        viewing_latest: bool, has_history: bool):
         can_run = running and halted and viewing_latest
-        can_nav = has_history and (not running or halted)
 
-        self.btn_stop.setEnabled(running)
-        self.btn_restart.setEnabled(not running)
+        self.btn_run.setEnabled(can_run)
         self.btn_step.setEnabled(can_run)
-        self.btn_cont_log.setEnabled(can_run)
-        self.btn_cont.setEnabled(can_run)
-        self.btn_rewind_all.setEnabled(can_nav)
-        self.btn_rewind.setEnabled(can_nav)
-        self.btn_forward.setEnabled(can_nav and not viewing_latest)
-        self.btn_forward_all.setEnabled(can_nav and not viewing_latest)
-
-        def _apply(btn, enabled, fg):
-            btn.setStyleSheet(_btn_style(fg=fg if enabled else _C_DISABLED))
-        _apply(self.btn_stop,        running,     _C_STOP)
-        _apply(self.btn_restart,     not running, _C_START)
-        _apply(self.btn_step,        can_run,     _C_STEP)
-        _apply(self.btn_cont_log,    can_run,     _C_STEP)
-        _apply(self.btn_cont,        can_run,     _C_STEP)
-        _apply(self.btn_rewind_all,  can_nav,     _C_HIST)
-        _apply(self.btn_rewind,      can_nav,     _C_HIST)
-        _apply(self.btn_forward,     can_nav and not viewing_latest, _C_HIST)
-        _apply(self.btn_forward_all, can_nav and not viewing_latest, _C_HIST)
+        self.btn_stop.setEnabled(running)
+        self.btn_restart.setEnabled(True)
 
 class DebuggerPanel(QWidget):
     """
@@ -389,6 +385,7 @@ class DebuggerPanel(QWidget):
         super().__init__(parent)
         self._repl   = repl_widget
         self._drive  = None
+        self._main_editor = None  # set by set_main_editor() after construction
 
         self._debug_history:   list[dict] = []
         self._history_index:   int        = 0
@@ -399,6 +396,10 @@ class DebuggerPanel(QWidget):
         self._gutter_connections: dict = {}
 
         self._build_ui()
+
+    def set_main_editor(self, editor):
+        """Store reference to the main editor (survives widget reparenting)."""
+        self._main_editor = editor
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -720,7 +721,7 @@ class DebuggerPanel(QWidget):
         written to disk before instrumentation reads them."""
         if not self._drive:
             return
-        main = self.parent()
+        main = self._main_editor
         if not main or not hasattr(main, 'editor_tab_widget'):
             return
         tab_widget = main.editor_tab_widget
@@ -820,6 +821,22 @@ class DebuggerPanel(QWidget):
 
     def _on_restart(self):
         all_files = get_all_python_files(self._drive) if self._drive else []
+        debug_files = self._config_page.get_debug_files()
+        if not debug_files:
+            debug_files = [f for f in all_files if f == "code.py"] or all_files[:1]
+
+        main = self._main_editor
+        if main and hasattr(main, '_save_drive_tabs'):
+            pass  # tabs auto-saved by _save_drive_tabs below
+        self._save_drive_tabs()
+        try:
+            watch_exprs = self._config_page.get_watch_exprs()
+            cond_bps = self._config_page.get_cond_breakpoints()
+            write_debug_files(self._drive, all_files, debug_files,
+                              watch_exprs, cond_bps)
+        except Exception:
+            pass
+
         self._debug_history   = []
         self._history_index   = 0
         self._serial_buf      = ""
@@ -838,6 +855,13 @@ class DebuggerPanel(QWidget):
         self._debugger_halted  = False
         self._toolbar.set_status("Stopped", _C_STOP)
         self._update_toolbar_state()
+
+        main = self._main_editor
+        if main:
+            if hasattr(main, '_clear_all_debug_highlights'):
+                main._clear_all_debug_highlights()
+            if hasattr(main, '_debug_bar'):
+                main._debug_bar.setVisible(False)
 
         if self._drive:
             cleanup_debug_files(self._drive)
@@ -900,9 +924,22 @@ class DebuggerPanel(QWidget):
         elapsed_ms = frame.get("t", 0)
 
         self._file_label.setText(f"{filename}  line {line_num}")
-        self._watch_display.update_watches(watches)
-        self._toolbar.set_memory(f"💾 {_fmt_bytes(mem_bytes)}")
-        self._toolbar.set_time(f"⏱ {elapsed_ms:.1f} ms")
+        # If the board sent watch values, show them. If not but the user
+        # has configured watches, show them with a restart hint.
+        if watches:
+            self._watch_display.update_watches(watches)
+        else:
+            configured = self._config_page.get_watch_exprs()
+            all_exprs = []
+            for scope_exprs in configured.values():
+                all_exprs.extend(scope_exprs)
+            if all_exprs:
+                hint = {e: "(restart debugger)" for e in all_exprs}
+                self._watch_display.update_watches(hint)
+            else:
+                self._watch_display.update_watches({})
+        self._toolbar.set_memory(f"  {_fmt_bytes(mem_bytes)}")
+        self._toolbar.set_time(f"  {elapsed_ms:.1f} ms")
 
         if self._drive and filename:
             filepath = os.path.join(self._drive, filename)
@@ -914,6 +951,13 @@ class DebuggerPanel(QWidget):
         if os.path.exists(filepath):
             self._code_view.show_line(filepath, line_num)
 
+        # Highlight the executing line in the editor tab using the
+        main = self._main_editor
+        if main and hasattr(main, 'highlight_debug_line'):
+            main.highlight_debug_line(filename, line_num)
+        if main and hasattr(main, 'update_debug_info'):
+            main.update_debug_info(filename, line_num, watches)
+
     def _update_toolbar_state(self):
         has_history    = bool(self._debug_history)
         viewing_latest = self._history_index == len(self._debug_history) - 1
@@ -923,3 +967,28 @@ class DebuggerPanel(QWidget):
             viewing_latest = viewing_latest,
             has_history    = has_history,
         )
+
+    def _highlight_editor_debug_line(self, filename: str, line_num: int):
+        """Highlight line_num in the matching editor tab."""
+        main = self._main_editor
+        if not main or not hasattr(main, 'editor_tab_widget'):
+            return
+        tab_widget = main.editor_tab_widget
+        for i in range(tab_widget.count()):
+            widget = tab_widget.widget(i)
+            fp = getattr(widget, '_file_path', None) or getattr(widget, 'current_file', None)
+            if fp and os.path.basename(fp) == filename:
+                if hasattr(widget, 'highlight_debug_line'):
+                    widget.highlight_debug_line(line_num)
+                return
+
+    def _clear_editor_debug_lines(self):
+        """Clear debug highlights from all open editor tabs."""
+        main = self._main_editor
+        if not main or not hasattr(main, 'editor_tab_widget'):
+            return
+        tab_widget = main.editor_tab_widget
+        for i in range(tab_widget.count()):
+            widget = tab_widget.widget(i)
+            if hasattr(widget, 'clear_debug_highlight'):
+                widget.clear_debug_highlight()
