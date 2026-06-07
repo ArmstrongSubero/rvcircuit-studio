@@ -1,9 +1,9 @@
+
 # RV Circuit Studio
 
 Desktop CircuitPython IDE. Replaces Mu.
 
-
-<img width="1919" height="1029" alt="image" src="https://github.com/user-attachments/assets/a4d13c4a-f33b-48d8-90bd-0a6a2570f0df" />
+<img width="1919" height="1029" alt="Screenshot 2026-06-06 224041" src="https://github.com/user-attachments/assets/5a9c1075-dd6b-43a5-bba9-0676dfb06317" />
 
 
 ##
