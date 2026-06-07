@@ -1,7 +1,7 @@
 
 # RV Circuit Studio
 
-Desktop CircuitPython IDE. **Privacy First**. Powerful and **Low Latency**. Native Performance. **Replaces Mu Editor**. 
+Desktop CircuitPython IDE. **Privacy First**. Powerful and **Low Latency**. Native Performance. **A modern replacement for Mu Editor**. 
 
 <img width="1919" height="1029" alt="Screenshot 2026-06-06 224041" src="https://github.com/user-attachments/assets/5a9c1075-dd6b-43a5-bba9-0676dfb06317" />
 
