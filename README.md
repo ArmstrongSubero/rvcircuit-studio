@@ -134,10 +134,29 @@ rvcircuit-studio
 
 ### Linux
 
+Download the standalone binary from [Releases](https://github.com/ArmstrongSubero/rvcircuit-studio/releases).
+
+```
+chmod +x RVCircuitStudio
+./RVCircuitStudio
+```
+
+You may need to install `libxcb-cursor0` and add yourself to the `dialout` group for serial port access:
+
+```
+sudo apt install libxcb-cursor0
+sudo usermod -a -G dialout $USER
+```
+
+Log out and back in after the group change.
+
+Or via pip:
+
 ```
 pip install rvcircuit-studio
 rvcircuit-studio
 ```
+
 
 ## Requirements
 
