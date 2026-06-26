@@ -18,7 +18,7 @@ The **first** native dedicated CircuitPython IDE with:
   - First with readonly filesystem error guidance
   - In-built snippet system
 
-Native, performant IDE that's 100% offline from day one, no accounts, no cloud. Runs from a flash drive. Ideal for environments where there is spotty internet access or data privacy is needed. Your code stays on your machine. No login, no telemetry, no "sync to cloud", no latency or 3rd party servers just you and your board! 
+Native, performant IDE that's 100% offline from day one, no accounts, no cloud. Runs from a flash drive. Ideal for environments where there is spotty internet access or data privacy is needed. Your code stays on your machine. No login, no telemetry, no "sync to cloud", no latency or 3rd party servers just you and your board! All features **tested on hardware** and verified across platforms!
 
 **Protect your privacy!**
 
