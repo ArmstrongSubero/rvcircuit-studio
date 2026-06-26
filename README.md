@@ -121,6 +121,10 @@ rvcircuit-studio
 
 ### macOS
 
+Download the standalone portable exe from [Releases](https://github.com/ArmstrongSubero/rvcircuit-studio/releases) 
+
+Or via pip:
+
 ```
 pip install rvcircuit-studio
 ```
