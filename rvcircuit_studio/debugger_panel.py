@@ -587,7 +587,7 @@ class DebuggerPanel(QWidget):
         line numbers toggles breakpoints too (the MarkArea alone is too narrow
         for users to discover reliably).
 
-        Safe to call multiple times for the same qpart duplicate connections
+        Safe to call multiple times for the same qpart -- duplicate connections
         are skipped.
         """
         qpart_id = id(qpart)

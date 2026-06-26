@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rvcircuit-studio"
-version = "0.3.1"
+version = "1.0.0"
 description = "Desktop CircuitPython IDE with source-level debugger, serial REPL, plotter, and library manager"
 readme = "README.md"
 license = {text = "Apache-2.0"}

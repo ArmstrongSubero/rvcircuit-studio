@@ -17,21 +17,21 @@ from .common import *
 _IDE_ROOT = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
 
 def _icon(name):
-    """Load icon from icons/ directory, preferring SVG over PNG."""
+    """Load icon from icons/ directory, preferring SVG for consistency."""
     base = os.path.join(_IDE_ROOT, "icons")
-    svg_name = name.replace(".png", ".svg")
-    svg_path = os.path.join(base, svg_name)
-    if os.path.exists(svg_path):
-        return QIcon(svg_path)
-    png_path = os.path.join(base, name)
-    if os.path.exists(png_path):
-        return QIcon(png_path)
+    stem = os.path.splitext(name)[0]
+    for ext in (".svg", ".png"):
+        path = os.path.join(base, stem + ext)
+        if os.path.exists(path):
+            return QIcon(path)
     return QIcon()
 
 class ToolbarManager:
     def __init__(self, parent: QWidget, editor, window: QMainWindow):
         self.toolbar = QToolBar("Circuit Studio Toolbar", parent)
-        self.toolbar.setIconSize(QSize(24, 24))
+        _is_mac = platform.system() == "Darwin"
+        _icon_sz = 28 if _is_mac else 24
+        self.toolbar.setIconSize(QSize(_icon_sz, _icon_sz))
         self.toolbar.setMovable(False)
         self.editor = editor
         self.window = window
@@ -52,23 +52,23 @@ class ToolbarManager:
         self.save_as_action.setShortcut(QKeySequence("Ctrl+Shift+S"))
         self.close_action        = QAction(_icon("close.png"),        "Close",        self.toolbar)
 
-        self.toggle_explorer_action = QAction("E", self.toolbar)
+        self.toggle_explorer_action = QAction(_icon("explorer.svg"), "Explorer", self.toolbar)
         self.toggle_explorer_action.setToolTip("Toggle Explorer")
         self.toggle_explorer_action.setCheckable(True)
 
-        self.toggle_snippets_action = QAction("S", self.toolbar)
+        self.toggle_snippets_action = QAction(_icon("snippets.svg"), "Snippets", self.toolbar)
         self.toggle_snippets_action.setToolTip("Toggle Snippets")
         self.toggle_snippets_action.setCheckable(True)
 
-        self.toggle_editor_action = QAction("C", self.toolbar)
+        self.toggle_editor_action = QAction(_icon("code_panel.svg"), "Code", self.toolbar)
         self.toggle_editor_action.setToolTip("Toggle Code Panel")
         self.toggle_editor_action.setCheckable(True)
 
-        self.toggle_repl_action = QAction("T", self.toolbar)
+        self.toggle_repl_action = QAction(_icon("terminal.svg"), "Terminal", self.toolbar)
         self.toggle_repl_action.setToolTip("Toggle REPL Terminal")
         self.toggle_repl_action.setCheckable(True)
 
-        self.toggle_debug_panel_action = QAction("D", self.toolbar)
+        self.toggle_debug_panel_action = QAction(_icon("debug_panel.svg"), "Debug", self.toolbar)
         self.toggle_debug_panel_action.setToolTip("Toggle Debug Panel (watches, config)")
         self.toggle_debug_panel_action.setCheckable(True)
 
@@ -78,10 +78,10 @@ class ToolbarManager:
         self.start_debug_action = QAction(_icon("debug_start.png"), "Start Debugging", self.toolbar)
         self.start_debug_action.setToolTip("Start a step-through debug session on the board")
 
-        self.format_action = QAction("{ }", self.toolbar)
+        self.format_action = QAction(_icon("format.svg"), "Format", self.toolbar)
         self.format_action.setToolTip("Format code with Black")
 
-        self.serial_action = QAction(_icon("serial.png"), "REPL", self.toolbar)
+        self.serial_action = QAction(_icon("serial.svg"), "REPL", self.toolbar)
         self.serial_action.setToolTip("Open REPL and connect to board")
         self.serial_action.setCheckable(True)
 
@@ -100,21 +100,24 @@ class ToolbarManager:
         """Port + baud dropdowns - same as RV Circuit Studio."""
         self.port_label = QLabel(" Port ")
         self.port_label.setStyleSheet(
-            f"font-size:9px;color:{CS_TEXT_MUTED};font-family:'JetBrains Mono';"
+            f"font-size:10px;color:{CS_TEXT_MUTED};font-family:'JetBrains Mono';"
             "letter-spacing:0.5px;"
         )
 
         self.port_combo = QComboBox()
-        self.port_combo.setFixedWidth(130)
+        self.port_combo.setFixedWidth(150)
         self.port_combo.setToolTip("Serial / REPL port")
 
-        self.port_refresh_btn = QPushButton("⟳")
-        self.port_refresh_btn.setFixedSize(28, 28)
+        self.port_refresh_btn = QPushButton()
+        _refresh_icon = _icon("refresh.svg")
+        self.port_refresh_btn.setIcon(_refresh_icon)
+        self.port_refresh_btn.setIconSize(QSize(18, 18))
+        self.port_refresh_btn.setFixedSize(32, 32)
         self.port_refresh_btn.setToolTip("Refresh ports")
         self.port_refresh_btn.setStyleSheet(f"""
             QPushButton {{
                 background: transparent; border: 1px solid transparent;
-                border-radius: 5px; color: {CS_ACCENT}; font-size: 14px; padding: 0;
+                border-radius: 6px; padding: 0;
             }}
             QPushButton:hover {{
                 background: rgba(88,166,255,0.12);
@@ -125,11 +128,11 @@ class ToolbarManager:
 
         self.baud_label = QLabel(" Baud ")
         self.baud_label.setStyleSheet(
-            f"font-size:9px;color:{CS_TEXT_MUTED};font-family:'JetBrains Mono';"
+            f"font-size:10px;color:{CS_TEXT_MUTED};font-family:'JetBrains Mono';"
         )
 
         self.baud_combo = QComboBox()
-        self.baud_combo.setFixedWidth(110)
+        self.baud_combo.setFixedWidth(120)
         for baud in ["9600","19200","38400","57600","115200","230400","460800","921600"]:
             self.baud_combo.addItem(baud)
         idx = self.baud_combo.findText("115200")
@@ -179,9 +182,9 @@ class ToolbarManager:
         self.toolbar.addSeparator()
 
         self.save_status_label = QLabel("● Safe to remove")
-        self.save_status_label.setFixedWidth(160)
+        self.save_status_label.setFixedWidth(180)
         self.save_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.save_status_label.setStyleSheet(f"font-size: 9pt; padding: 0 6px; color: {CS_SUCCESS};")
+        self.save_status_label.setStyleSheet(f"font-size: 10pt; padding: 0 8px; color: {CS_SUCCESS};")
         self.toolbar.addWidget(self.save_status_label)
         self.toolbar.addSeparator()
 
@@ -222,25 +225,25 @@ class ToolbarManager:
         if success:
             self.save_status_label.setText("● Saved to board")
             self.save_status_label.setStyleSheet(
-                f"font-size: 9pt; padding: 0 6px; color: {CS_SUCCESS};"
+                f"font-size: 10pt; padding: 0 8px; color: {CS_SUCCESS};"
             )
             QTimer.singleShot(3000, self._show_safe_to_remove)
         else:
             self.save_status_label.setText("● Write error")
             self.save_status_label.setStyleSheet(
-                f"font-size: 9pt; padding: 0 6px; color: {CS_DANGER};"
+                f"font-size: 10pt; padding: 0 8px; color: {CS_DANGER};"
             )
 
     def show_saving_in_progress(self):
         self.save_status_label.setText("● Do not remove")
         self.save_status_label.setStyleSheet(
-            f"font-size: 9pt; padding: 0 6px; color: {CS_DANGER};"
+            f"font-size: 10pt; padding: 0 8px; color: {CS_DANGER};"
         )
 
     def _show_safe_to_remove(self):
         self.save_status_label.setText("● Safe to remove")
         self.save_status_label.setStyleSheet(
-            f"font-size: 9pt; padding: 0 6px; color: {CS_SUCCESS};"
+            f"font-size: 10pt; padding: 0 8px; color: {CS_SUCCESS};"
         )
 
     def initial_port_scan(self):
