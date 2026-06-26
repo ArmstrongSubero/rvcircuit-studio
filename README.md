@@ -3,7 +3,8 @@
 
 Desktop CircuitPython IDE. **Privacy First**. Powerful and **Low Latency**. Native Performance. **A modern replacement for Mu Editor**. 
 
-<img width="1919" height="1029" alt="Screenshot 2026-06-06 224041" src="https://github.com/user-attachments/assets/5a9c1075-dd6b-43a5-bba9-0676dfb06317" />
+<img width="1919" height="1028" alt="image" src="https://github.com/user-attachments/assets/bcb31219-b637-4829-98ca-18c95bcd0e5c" />
+
 
 ##
 
