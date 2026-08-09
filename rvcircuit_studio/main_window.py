@@ -41,6 +41,12 @@ while True:
     time.sleep(0.5)
 """
 
+def _strip_dirty(title: str) -> str:
+    """Drop the trailing " *" dirty marker without eating asterisks that are
+    part of the filename. rstrip(" *") removed every trailing star."""
+    return title[:-2] if title.endswith(" *") else title
+
+
 class CircuitStudioEditor(QWidget):
     """
     Main editor widget for RV Circuit Studio.
@@ -228,6 +234,8 @@ class CircuitStudioEditor(QWidget):
 
         self.repl_panel.data_received.connect(self._on_serial_data)
         self.repl_panel.data_received.connect(self.debugger_panel.feed_serial)
+        self.debugger_panel.sig_session_ended.connect(self._teardown_debug_ui)
+        self.debugger_panel.sig_status.connect(self._show_debug_status)
 
         self.repl_tab_btn.clicked.connect(self._on_repl_tab_clicked)
         self.plotter_tab_btn.clicked.connect(lambda: self._switch_bottom_tab(1))
@@ -263,6 +271,7 @@ class CircuitStudioEditor(QWidget):
         config = self._load_config()
         editor_fs = int(config.get("editor", {}).get("font_size", 10))
         self.apply_font_size_to_all_tabs(editor_fs)
+        self.apply_editor_settings()
         ui_fs = int(config.get("ui", {}).get("font_size", 10))
         self.apply_ui_font_size(ui_fs)
 
@@ -328,7 +337,9 @@ class CircuitStudioEditor(QWidget):
 
         boot = read_boot_out(drive)
         self._cp_version  = boot.get("version", "9")
-        self._cp_major    = boot.get("major", "9")
+        # read_boot_out returns "" when nothing parsed. Fall back here rather
+        # than inside it, so callers can tell "unknown" from a real 9.x board.
+        self._cp_major    = boot.get("major") or "9"
         self._board_name  = boot.get("board", "")
 
         if boot.get("version"):
@@ -399,7 +410,6 @@ class CircuitStudioEditor(QWidget):
     def _on_board_disconnected(self):
         self._board_drive = None
         self._repl_port   = None
-        self._repl_running = True  # assume code is running when connected
         self._set_board_status_ui(BoardStatus.DISCONNECTED)
         if self.repl_panel.is_connected:
             self.repl_panel.disconnect()
@@ -460,6 +470,27 @@ class CircuitStudioEditor(QWidget):
                 return
             config   = self._load_config()
             filename = config.get("board", {}).get("filename", "code.py")
+
+            # The current tab's text is what gets written to the entry point.
+            # Running while a helper module has focus would silently overwrite
+            # code.py with that module, so confirm when the names disagree.
+            idx = self.editor_tab_widget.currentIndex()
+            widget = self.editor_tab_widget.widget(idx) if idx >= 0 else None
+            cur_path = getattr(widget, '_file_path', None)
+            cur_name = os.path.basename(cur_path) if cur_path else None
+            if cur_name and cur_name != filename:
+                reply = QMessageBox.question(
+                    self.window, "Overwrite Board Entry Point?",
+                    f"The current tab is {cur_name}, but Run writes to "
+                    f"{filename} on the board.\n\n"
+                    f"This will replace {filename} with the contents of "
+                    f"{cur_name}.\n\nContinue?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+
             ok = save_to_board(code, drive, filename)
             if ok:
                 # "save locally as well as on the board so code isn't lost if
@@ -608,6 +639,7 @@ class CircuitStudioEditor(QWidget):
         and delegates to the debugger panel for instrumentation."""
         # Kick the debugger panel's start flow (handles drive/REPL checks,
         # instrumentation, and serial start sequence).
+        self._debug_bar.setVisible(True)
         self.debugger_panel._on_start_clicked()
         if self.debugger_panel._debugger_running:
             self._debug_bar.setVisible(True)
@@ -619,22 +651,57 @@ class CircuitStudioEditor(QWidget):
 
     def _cp_dbg_run(self):
         """Continue with visual line tracking (CW)."""
+        if not self._dbg_active():
+            return
         self.debugger_panel._on_continue_log()
 
     def _cp_dbg_step(self):
         """Step one line."""
+        if not self._dbg_active():
+            return
         self.debugger_panel._on_step()
+
+    def _dbg_active(self) -> bool:
+        """True while a session is live and accepting signals. Sending [S] to
+        a bare REPL raises NameError on the board, so every control checks
+        first. A start handshake in flight is not yet accepting signals."""
+        panel = self.debugger_panel
+        if panel._pending_start is not None:
+            return False
+        if panel._debugger_running:
+            return True
+        self._teardown_debug_ui()
+        return False
 
     def _cp_dbg_restart(self):
         """Restart the debug session from the top."""
         self.debugger_panel._on_restart()
+        if self.debugger_panel._debugger_running:
+            self._debug_bar.setVisible(True)
+            self.repl_panel._debug_mode = True
 
     def _cp_dbg_stop(self):
         """Stop the debug session and hide the inline bar."""
         self.debugger_panel._on_stop()
+        self._teardown_debug_ui()
+
+    def _show_debug_status(self, text: str, color: str):
+        """Mirror the debugger's status onto the inline bar, which is the only
+        place the user can see it."""
+        try:
+            self._dbg_status_label.setText(text)
+            self._dbg_status_label.setStyleSheet(
+                f"color: {color}; font-weight: bold; padding-right: 8px;")
+        except Exception:
+            pass
+
+    def _teardown_debug_ui(self):
+        """Return the UI to its normal state. Shared by the Stop button and
+        by the program ending on its own."""
         self._debug_bar.setVisible(False)
         self._clear_all_debug_highlights()
         self.repl_panel._debug_mode = False
+        self.repl_panel._dbg_hold = ""
 
     def highlight_debug_line(self, filename, line_number):
         """Highlight the executing line in the editor tab."""
@@ -673,14 +740,13 @@ class CircuitStudioEditor(QWidget):
 
         # Paint a highlight bar on the stopped line using qutepart's
         # setExtraSelections (takes (absolutePosition, length) tuples).
+        # Go through the editor wrapper so this selection lives alongside the
+        # word and error highlights instead of replacing them. Writing
+        # qpart.setExtraSelections directly meant the next click erased the
+        # executing-line bar mid-halt.
         try:
-            fmt = QTextCharFormat()
-            fmt.setBackground(QColor("#1a3a5c"))  # blue debug bar
-            fmt.setProperty(QTextCharFormat.Property.FullWidthSelection, True)
-            qpart._userExtraSelectionFormat = fmt
-            length = max(1, block.length() - 1)
-            qpart.setExtraSelections([(block.position(), length)])
-            self._debug_highlight_editor = qpart
+            match_widget.set_debug_line(line_number)
+            self._debug_highlight_editor = match_widget
         except Exception:
             pass
 
@@ -689,7 +755,7 @@ class CircuitStudioEditor(QWidget):
         ed = getattr(self, "_debug_highlight_editor", None)
         if ed is not None:
             try:
-                ed.setExtraSelections([])
+                ed.set_debug_line(None)
             except Exception:
                 pass
             self._debug_highlight_editor = None
@@ -992,16 +1058,19 @@ class CircuitStudioEditor(QWidget):
         self.debugger_panel.install_gutter(editor.qpart, "untitled.py")
         return editor
 
-    def on_save(self):
-        """Save current tab. If CIRCUITPY is mounted and auto-save is on, save to board."""
+    def on_save(self) -> bool:
+        """Save current tab. Returns True only if the file was actually written.
+
+        close_tab and the app exit handler rely on the return value: a
+        cancelled Save As must not let the tab close and lose the work.
+        """
         idx = self.editor_tab_widget.currentIndex()
         if idx < 0:
-            return
-        tab_title = self.editor_tab_widget.tabText(idx)
+            return False
         widget    = self.editor_tab_widget.widget(idx)
         code      = self._get_current_editor_text()
         if code is None:
-            return
+            return False
 
         config    = self._load_config()
         auto_save = config.get("board", {}).get("auto_save", True)
@@ -1010,8 +1079,7 @@ class CircuitStudioEditor(QWidget):
 
         current_path = getattr(widget, '_file_path', None)
         if not current_path:
-            self.on_save_as()
-            return
+            return self.on_save_as()
 
         try:
             self.toolbar_manager.show_saving_in_progress()
@@ -1033,18 +1101,21 @@ class CircuitStudioEditor(QWidget):
             # Auto-detect runs after every save; it decides internally whether
             # this file lives on the board before doing anything.
             QTimer.singleShot(400, lambda p=current_path: self._check_missing_libraries(saved_path=p))
+            return True
         except Exception as e:
             self.toolbar_manager.show_save_status(False)
             QMessageBox.critical(self.window, "Save Error", str(e))
+            return False
 
-    def on_save_as(self):
+    def on_save_as(self) -> bool:
+        """Returns True only if a path was chosen and the write succeeded."""
         idx = self.editor_tab_widget.currentIndex()
         if idx < 0:
-            return
+            return False
         widget = self.editor_tab_widget.widget(idx)
         code   = self._get_current_editor_text()
         if code is None:
-            return
+            return False
 
         start_dir = self._board_drive or (self.current_project_directory or "")
         path, _ = QFileDialog.getSaveFileName(
@@ -1066,13 +1137,43 @@ class CircuitStudioEditor(QWidget):
                 proxy_idx = self.proxyModel.mapFromSource(src_idx)
                 self.fileView.scrollTo(proxy_idx)
                 self.fileView.setCurrentIndex(proxy_idx)
+                self._repoint_gutter(widget, path)
+                return True
             except Exception as e:
                 QMessageBox.critical(self.window, "Save Error", str(e))
+                return False
+        return False
+
+    def _repoint_gutter(self, widget, new_path: str):
+        """Re-register a tab's gutter under its new filename.
+
+        install_gutter captures the filename for the life of the tab, so a
+        tab created as untitled.py kept reporting breakpoints under that name
+        after Save As and they never matched a file on the drive.
+        """
+        qpart = getattr(widget, 'qpart', None)
+        if qpart is None:
+            return
+        try:
+            marks = set()
+            mark_area = qpart._margins[1]
+            block = qpart.document().begin()
+            while block.isValid():
+                if mark_area.getBlockValue(block):
+                    marks.add(block.blockNumber())
+                block = block.next()
+            self.debugger_panel.uninstall_gutter(qpart)
+            self.debugger_panel.install_gutter(qpart, new_path)
+            for n in marks:
+                mark_area.setBlockValue(qpart.document().findBlockByNumber(n), 1)
+            mark_area.update()
+        except Exception:
+            pass
 
     def close_tab(self, idx):
         widget = self.editor_tab_widget.widget(idx)
         if widget and getattr(widget, '_modified', False):
-            name = self.editor_tab_widget.tabText(idx).rstrip(" *")
+            name = _strip_dirty(self.editor_tab_widget.tabText(idx))
             reply = QMessageBox.question(
                 self.window, "Unsaved Changes",
                 f"{name} has unsaved changes.\nSave before closing?",
@@ -1084,7 +1185,8 @@ class CircuitStudioEditor(QWidget):
                 return
             if reply == QMessageBox.StandardButton.Save:
                 self.editor_tab_widget.setCurrentIndex(idx)
-                self.on_save()
+                if not self.on_save():
+                    return   # Save As cancelled or write failed; keep the tab
         if widget and hasattr(widget, 'qpart'):
             self.debugger_panel.uninstall_gutter(widget.qpart)
             try:
@@ -1132,7 +1234,10 @@ class CircuitStudioEditor(QWidget):
             if fp:
                 try:
                     if os.path.normcase(os.path.abspath(fp)) == norm_path:
-                        if hasattr(w, 'openFile'):
+                        # Only re-read from disk when there is nothing to lose.
+                        # Reloading unconditionally silently reverted a tab the
+                        # user had unsaved edits in.
+                        if hasattr(w, 'openFile') and not getattr(w, '_modified', False):
                             w.openFile(path)
                         self.editor_tab_widget.setCurrentIndex(i)
                         return
@@ -1153,7 +1258,7 @@ class CircuitStudioEditor(QWidget):
         self.editor_tab_widget.setCurrentIndex(idx)
         self._connect_editor_signals(editor, lambda: idx)
         if path.lower().endswith('.py'):
-            self.debugger_panel.install_gutter(editor.qpart, basename)
+            self.debugger_panel.install_gutter(editor.qpart, path)
 
     def show_context_menu(self, pos):
         index = self.fileView.indexAt(pos)
@@ -1393,6 +1498,33 @@ class CircuitStudioEditor(QWidget):
             f"QTabBar::tab {{ {font_css} }}"
         )
 
+    def apply_editor_settings(self, config: dict = None):
+        """Apply the editor settings the dialog writes.
+
+        tab_width, autocomplete, line_numbers and vim_mode were round tripped
+        through the config and never read by anything.
+        """
+        cfg = (config or self._load_config()).get("editor", {})
+        width  = int(cfg.get("tab_width", 4))
+        auto   = bool(cfg.get("autocomplete", True))
+        nums   = bool(cfg.get("line_numbers", True))
+        vim    = bool(cfg.get("vim_mode", False))
+        for i in range(self.editor_tab_widget.count()):
+            w = self.editor_tab_widget.widget(i)
+            q = getattr(w, "qpart", None)
+            if q is None:
+                continue
+            try:
+                q.indentWidth = width
+                q.completionEnabled = auto
+                if hasattr(q, "_margins") and q._margins:
+                    q._margins[0].setVisible(nums)
+                    q.updateViewport()
+                if hasattr(q, "vimModeEnabled"):
+                    q.vimModeEnabled = vim
+            except Exception:
+                pass
+
     def show_settings(self):
         dlg = SettingsDialog(self.window)
         dlg.exec()
@@ -1401,6 +1533,7 @@ class CircuitStudioEditor(QWidget):
         self.apply_font_size_to_all_tabs(font_size)
         ui_font_size = int(config.get("ui", {}).get("font_size", 10))
         self.apply_ui_font_size(ui_font_size)
+        self.apply_editor_settings(config)
 
     def show_find_replace_dialog(self):
         idx = self.editor_tab_widget.currentIndex()
@@ -1471,6 +1604,51 @@ class CircuitStudioEditor(QWidget):
                 self.editor_tab_widget.removeTab(i)
                 if w is not None:
                     w.deleteLater()
+
+    def confirm_close(self) -> bool:
+        """Prompt for unsaved tabs before the app quits.
+
+        Returns False if the user cancels, in which case the window must stay
+        open. Previously the app exited without ever checking _modified.
+        """
+        dirty = []
+        for i in range(self.editor_tab_widget.count()):
+            w = self.editor_tab_widget.widget(i)
+            if getattr(w, '_modified', False):
+                dirty.append((i, _strip_dirty(self.editor_tab_widget.tabText(i))))
+        if not dirty:
+            return True
+
+        names = "\n".join("  " + n for _, n in dirty)
+        reply = QMessageBox.question(
+            self.window, "Unsaved Changes",
+            f"These files have unsaved changes:\n\n{names}\n\nSave before quitting?",
+            QMessageBox.StandardButton.Save |
+            QMessageBox.StandardButton.Discard |
+            QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save
+        )
+        if reply == QMessageBox.StandardButton.Cancel:
+            return False
+        if reply == QMessageBox.StandardButton.Discard:
+            return True
+        for i, _ in dirty:
+            self.editor_tab_widget.setCurrentIndex(i)
+            if not self.on_save():
+                return False
+        return True
+
+    def terminate_editors(self):
+        """qutepart requires terminate() before the app stops or its
+        highlighter and completer threads can crash on shutdown. close_tab
+        does this per tab; tabs still open at quit were being skipped."""
+        for i in range(self.editor_tab_widget.count()):
+            w = self.editor_tab_widget.widget(i)
+            try:
+                if hasattr(w, 'qpart'):
+                    w.qpart.terminate()
+            except Exception:
+                pass
 
     def save_editor_state(self):
         pass  # Extend later to persist open tabs

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rvcircuit-studio"
-version = "1.0.0"
+version = "1.1.0"
 description = "Desktop CircuitPython IDE with source-level debugger, serial REPL, plotter, and library manager"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["circuitpython", "ide", "microcontroller", "embedded", "education"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Education",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
@@ -23,6 +23,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Embedded Systems",
     "Topic :: Education",
 ]
@@ -47,10 +48,17 @@ rvcircuit-studio-gui = "rvcircuit_studio.app:main"
 [tool.setuptools.packages.find]
 include = ["rvcircuit_studio*"]
 
+# 398 non-Python files have to ship or the app starts with no icons, no font,
+# no snippets, and no syntax highlighting. The stale copy only listed the
+# qutepart syntax database.
 [tool.setuptools.package-data]
 "rvcircuit_studio" = [
-    "qutepart/**/*",
-    "icons/**/*",
-    "font/*",
     "snippets.json",
+    "icons/*",
+    "font/*",
+    "LICENSES/*",
+]
+"rvcircuit_studio.qutepart" = [
+    "syntax/data/**/*",
+    "icons/*",
 ]

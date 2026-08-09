@@ -61,8 +61,13 @@ class SerialPlotter(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._traces: dict[str, dict] = {}   # name → {buf, curve, colour_idx}
+        # Stays None on the no-pyqtgraph fallback UI, which does not build
+        # a plot to hang a placeholder on.
+        self._placeholder = None
         self._window = _DEFAULT_WINDOW
-        self._paused = True
+        # Start live. Starting paused made the panel look broken until the
+        # user noticed the Resume button.
+        self._paused = False
         self._line_buf = ""                  # partial line accumulator
         self._sample_counter = 0
         self._recording = False
@@ -233,7 +238,8 @@ class SerialPlotter(QWidget):
         self._traces.clear()
         self._sample_counter = 0
         self._line_buf = ""
-        self._placeholder.setVisible(True)
+        if self._placeholder is not None:
+            self._placeholder.setVisible(True)
         self._update_legend()
 
     def _process_line(self, line: str):
@@ -277,7 +283,11 @@ class SerialPlotter(QWidget):
         Accept  temp=23.4,humidity=61  or  a=1 b=2  (space-separated too).
         Returns dict {name: float} or None if it doesn't look labelled.
         """
-        tokens = re.findall(r"([A-Za-z_]\w*)\s*=\s*(-?[0-9]+(?:\.[0-9]*)?)", line)
+        # Accept scientific notation and a leading dot: 1e-3 used to parse as
+        # 1 and .5 was rejected outright.
+        tokens = re.findall(
+            r"([A-Za-z_]\w*)\s*=\s*"
+            r"([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)", line)
         if not tokens:
             return None
         try:
@@ -356,7 +366,8 @@ class SerialPlotter(QWidget):
     def _push_values(self, values: dict):
         """Add one sample point per trace name."""
         self._sample_counter += 1
-        self._placeholder.setVisible(False)
+        if self._placeholder is not None:
+            self._placeholder.setVisible(False)
 
         colour_idx = len(self._traces)
         # Cap distinct traces so a stream with changing labels can't grow them

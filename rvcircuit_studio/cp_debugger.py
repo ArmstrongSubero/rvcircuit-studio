@@ -75,6 +75,23 @@ def _is_docstring(node: ast.AST) -> bool:
         and isinstance(node.value.value, str)
     )
 
+def _is_elif(node: ast.AST, parent: ast.AST) -> bool:
+    """
+    True when *node* is the `elif` clause of *parent*.
+
+    Python has no Elif node: `elif` is an If sitting alone in the parent If's
+    orelse. The discriminator against a real `else:` containing a nested if is
+    indentation, since an elif shares its parent's column.
+    """
+    return (
+        isinstance(node, ast.If)
+        and isinstance(parent, ast.If)
+        and len(parent.orelse) == 1
+        and parent.orelse[0] is node
+        and node.col_offset == parent.col_offset
+    )
+
+
 def _walk_steppable(node: ast.AST, rows: set, parent=None):
     """Recursive DFS collecting steppable line numbers (0-based)."""
     if isinstance(node, _SKIP_SELF):
@@ -86,6 +103,11 @@ def _walk_steppable(node: ast.AST, rows: set, parent=None):
 
     if type(node) in _TARGET_TYPES:
         if _is_docstring(node):
+            pass
+        elif _is_elif(node, parent):
+            # Instrumenting an elif inserts a statement between the if body and
+            # the elif, which reattaches the elif to the injected block and
+            # changes what the program does. Its body is still walked below.
             pass
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             if node.decorator_list:
@@ -121,6 +143,24 @@ def identify_steppable_lines(code: str) -> set:
     rows = set()
     _walk_steppable(tree, rows)
     return rows
+
+def check_parseable(code: str, filename: str = "<code>"):
+    """
+    Return None if *code* compiles, otherwise a short human readable reason.
+
+    Uses compile() rather than ast.parse(): errors like "name used prior to
+    global declaration" are raised by the symbol table pass, not the parser,
+    and ast.parse accepts them silently.
+    """
+    try:
+        compile(code, filename, "exec")
+        return None
+    except SyntaxError as exc:
+        where = f"line {exc.lineno}" if exc.lineno else "unknown line"
+        return f"{where}: {exc.msg}"
+    except (ValueError, RecursionError) as exc:
+        return str(exc)
+
 
 def _get_indent(line: str) -> str:
     """Return the leading whitespace of a line."""
@@ -187,32 +227,71 @@ def _generate_debug_block(
 
     return block
 
+_IMP_NAME = r"[A-Za-z_][A-Za-z0-9_]*"
+_IMP_ONE  = re.compile(
+    rf"^({_IMP_NAME}(?:\.{_IMP_NAME})*)(?:\s+as\s+({_IMP_NAME}))?$"
+)
+_TRIPLE = re.compile(r'"""|\'\'\'')
+
+
 def _rewrite_imports(lines: list, all_python_files: list) -> list:
     """
     Rewrite cross-file imports so they reference the ide_debug_ prefixed copies.
-    Works on 'import foo' and 'from foo import ...' for files in all_python_files.
+
+    Handles 'from foo import ...', 'import foo', 'import foo as f' and
+    'import foo, bar'. Dotted forms such as 'import foo.util' are left alone:
+    the debug copies are flat files on the drive root, so there is no package
+    for a dotted name to resolve against.
+
+    Lines inside triple quoted strings are skipped, since this is a line based
+    rewrite and a bare import line inside a docstring is data, not code.
     """
     file_stems = {os.path.splitext(f)[0] for f in all_python_files}
     result = []
+    in_triple = False
+
     for line in lines:
-        m = re.match(r"^(\s*)from\s+([a-zA-Z0-9_]+)\s+import", line)
-        if m and m.group(2) in file_stems:
-            mod = m.group(2)
-            line = line.replace(f"from {mod}", f"from {PREFIX}{mod}", 1)
+        was_in_triple = in_triple
+        # Toggle once per delimiter on the line; odd count flips the state.
+        if len(_TRIPLE.findall(line)) % 2:
+            in_triple = not in_triple
+        if was_in_triple:
             result.append(line)
             continue
 
-        m = re.match(r"^(\s*)import\s+([a-zA-Z0-9_]+)(\s+as\s+\w+)?$", line)
+        m = re.match(rf"^(\s*)from\s+({_IMP_NAME})\s+import", line)
         if m and m.group(2) in file_stems:
-            mod   = m.group(2)
-            alias = m.group(3)
-            if alias:
-                line = line.replace(f"import {mod}", f"import {PREFIX}{mod}", 1)
-            else:
-                indent = m.group(1)
-                line = f"{indent}import {PREFIX}{mod} as {mod}"
-            result.append(line)
+            mod = m.group(2)
+            result.append(line.replace(f"from {mod}", f"from {PREFIX}{mod}", 1))
             continue
+
+        m = re.match(r"^(\s*)import\s+(.+?)\s*$", line)
+        if m:
+            indent, body = m.group(1), m.group(2)
+            # An import statement cannot contain a string, so a '#' is always
+            # the start of a comment. Split it off and put it back afterwards.
+            comment = ""
+            if "#" in body:
+                body, _, tail = body.partition("#")
+                comment = "  #" + tail
+                body = body.strip()
+            if body.endswith("\\") or not body:
+                result.append(line)
+                continue
+            parts = [p.strip() for p in body.split(",")]
+            matches = [_IMP_ONE.match(p) for p in parts]
+            if all(matches) and any(
+                mm.group(1).split(".")[0] in file_stems for mm in matches
+            ):
+                out = []
+                for mm in matches:
+                    dotted, alias = mm.group(1), mm.group(2)
+                    if "." not in dotted and dotted in file_stems:
+                        out.append(f"{PREFIX}{dotted} as {alias or dotted}")
+                    else:
+                        out.append(mm.group(0))
+                result.append(f"{indent}import " + ", ".join(out) + comment)
+                continue
 
         result.append(line)
     return result
@@ -224,6 +303,7 @@ def instrument_file(
     cond_breakpoints: dict,
     all_python_files: list,
     is_entry_point: bool = False,
+    breakpoint_lines=None,
 ) -> str:
     """
     Return the fully instrumented source for *filename*.
@@ -237,7 +317,14 @@ def instrument_file(
     all_python_files  : list of all .py file names in the project (for import rewriting)
     is_entry_point    : True for code.py (or main.py when code.py absent) --
                         adds the DEBUG_START / DEBUG_END print wrappers
+    breakpoint_lines  : iterable of 1-based line numbers marked as breakpoints
+                        in the editor gutter. This is the primary source of
+                        breakpoints; the legacy "# BULLET" comment is still
+                        honoured so files written by older versions keep
+                        working, but new breakpoints never touch user source.
     """
+    bp_lines = set(breakpoint_lines or ())
+
     lines = code.splitlines()
 
     lines = _rewrite_imports(lines, all_python_files)
@@ -250,9 +337,9 @@ def instrument_file(
         if row >= len(lines):
             continue
         line_content = lines[row]
-        is_bp = _is_breakpoint_line(line_content)
-        indent = _get_indent(line_content)
         display_line = row + 1  # 1-based
+        is_bp = (display_line in bp_lines) or _is_breakpoint_line(line_content)
+        indent = _get_indent(line_content)
         block = _generate_debug_block(
             indent, is_bp, filename, display_line, watch_exprs, cond_breakpoints
         )
@@ -301,10 +388,13 @@ def generate_debug_state_module() -> str:
     a("")
     a("class DebugStates:")
     a("    _instance = None")
+    a("    _ready = False")
     a("    def __new__(cls, *av, **kw):")
     a("        if cls._instance is None: cls._instance = super().__new__(cls)")
     a("        return cls._instance")
     a("    def __init__(self):")
+    a("        if self._ready: return")
+    a("        self._ready = True")
     a("        self.t = _time()")
     a(f'        self.s = "{S}"')
     a('        self.d = {"t":_time(),"m":_memory(),"f":"","l":1,"w":{},"h":False}')
@@ -349,6 +439,7 @@ def write_debug_files(
     debug_files: list,
     watch_exprs: dict,
     cond_breakpoints: dict,
+    breakpoints: dict = None,
 ):
     """
     Instrument *debug_files* (subset of *all_python_files*) and write:
@@ -363,7 +454,17 @@ def write_debug_files(
     debug_files       : subset of all_python_files to actually instrument
     watch_exprs       : {scope: [expr, ...]}
     cond_breakpoints  : {scope: [expr, ...]}
+    breakpoints       : {filename: set(1-based line numbers)} from the gutter
+
+    Returns a report dict:
+        {"steppable":   {filename: count},
+         "unparseable":  {filename: reason},   # the user's own source
+         "broken":       {filename: reason},   # the generated debug copy
+         "breakpoints":  total_breakpoints_placed}
     """
+    breakpoints = breakpoints or {}
+    report = {"steppable": {}, "unparseable": {}, "broken": {}, "breakpoints": 0}
+
     cleanup_debug_files(drive_root)
 
     has_code_py = "code.py" in all_python_files
@@ -386,18 +487,44 @@ def write_debug_files(
         is_debug = filename in debug_files
 
         if is_debug:
+            reason = check_parseable(code)
+            if reason:
+                report["unparseable"][filename] = reason
+
+            file_bps = set(breakpoints.get(filename, ()))
+            steppable = identify_steppable_lines(code)
+            # Only count breakpoints that actually land on a steppable line;
+            # anything else would never fire and the user should be told.
+            effective = {b for b in file_bps if (b - 1) in steppable}
+            report["steppable"][filename] = len(steppable)
+            report["breakpoints"] += len(effective)
+
             instrumented = instrument_file(
                 code, filename, filtered_watches, cond_breakpoints,
-                all_python_files, is_entry_point=is_entry
+                all_python_files, is_entry_point=is_entry,
+                breakpoint_lines=effective,
             )
         else:
+            # Not instrumented, so nothing in this file references _ds. Do not
+            # emit the header: constructing DebugStates here only creates a
+            # chance to disturb the live session state.
             lines = _rewrite_imports(code.splitlines(), all_python_files)
-            header = ["import ide_debug_state as _dbg\n", "_ds = _dbg.DebugStates()\n"]
-            instrumented = "".join(header) + "\n".join(lines) + "\n"
+            instrumented = "\n".join(lines) + "\n"
+
+        # The instrumentation itself can produce code that does not compile,
+        # from a malformed watch expression, a breakpoint on a line that will
+        # not accept a statement before it, or a watch on a name that a
+        # function later declares global. Checking the source only catches
+        # errors the user could already see.
+        broke = check_parseable(instrumented, PREFIX + filename)
+        if broke:
+            report["broken"][filename] = broke
 
         dst_name = PREFIX + filename
         dst_path = os.path.join(drive_root, dst_name)
         _safe_write(dst_path, instrumented)
+
+    return report
 
 def _safe_write(path: str, content: str):
     """Write text to path, creating directories as needed."""

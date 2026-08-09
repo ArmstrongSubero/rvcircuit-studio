@@ -233,6 +233,7 @@ class LibraryManagerDialog(QDialog):
     _install_done    = Signal(str, bool, str)    # lib stem, success, message
     _batch_done      = Signal(str)               # summary message
     _refresh_signal  = Signal()
+    _download_done   = Signal()                  # re-enable the button
 
     def __init__(self, drive_path: str, cp_version: str = "9",
                  project_dir: str = None, parent=None):
@@ -253,6 +254,7 @@ class LibraryManagerDialog(QDialog):
         self._status_signal.connect(self._on_status)
         self._progress_signal.connect(self._on_progress)
         self._index_ready.connect(self._on_index_ready)
+        self._download_done.connect(self._on_download_done)
         self._install_done.connect(self._on_install_done)
         self._batch_done.connect(self._on_batch_done)
         self._refresh_signal.connect(self._refresh_installed)
@@ -609,6 +611,13 @@ class LibraryManagerDialog(QDialog):
             self._status_signal.emit(f"Error: {e}")
         finally:
             self._progress_signal.emit(0)
+            # Runs on every exit path. Without it a failed download left the
+            # button disabled until the dialog was reopened.
+            self._download_done.emit()
+
+    def _on_download_done(self):
+        self.progress_bar.setVisible(False)
+        self.download_btn.setEnabled(True)
 
     def _on_index_ready(self, index: dict, manifest: dict):
         self._index = index

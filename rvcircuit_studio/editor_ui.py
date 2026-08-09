@@ -34,7 +34,9 @@ class CodeEditorWindow(Qutepart):
 
         try:
             import json as _j
-            _p = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "circuit_studio_config.json")
+            # Was dirname(dirname(__file__)), one level above the package,
+            # which is a different file from the one Settings uses.
+            from .app import CONFIG_FILE as _p
             if os.path.exists(_p):
                 with open(_p, encoding='utf-8') as _f:
                     self.zoom_level = int(_j.load(_f).get("editor", {}).get("font_size", 10))
@@ -77,33 +79,34 @@ class CodeEditorWindow(Qutepart):
         self.dedent_action.triggered.connect(self.decrease_indent)
         self.addAction(self.dedent_action)
 
-        self.ctrl_pressed = False
-        
+
 
     def eventFilter(self, obj, event):
         try:
             if event.type() == QEvent.Type.KeyPress:
-                if event.key() == Qt.Key.Key_Control:
-                    self.ctrl_pressed = True
-                elif self.ctrl_pressed and event.key() == Qt.Key.Key_F:
+                # Read the live modifier state off the event. A manual
+                # ctrl_pressed flag sticks whenever the editor misses the
+                # KeyRelease (Ctrl+click elsewhere, Ctrl+Tab, app switch),
+                # after which plain f, r, + and - stopped typing entirely.
+                ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                if not ctrl:
+                    pass
+                elif event.key() == Qt.Key.Key_F:
                     if hasattr(self, 'toggle_code_folding'):
                         self.toggle_code_folding()
                     return True
-                elif self.ctrl_pressed and event.key() == Qt.Key.Key_R:
+                elif event.key() == Qt.Key.Key_R:
                     if hasattr(self, 'toggle_block_comment'):
                         self.toggle_block_comment()
                     return True
-                elif self.ctrl_pressed and event.key() == Qt.Key.Key_Plus:
+                elif event.key() == Qt.Key.Key_Plus:
                     if hasattr(self, 'zoom_in'):
                         self.zoom_in()
                     return True
-                elif self.ctrl_pressed and event.key() == Qt.Key.Key_Minus:
+                elif event.key() == Qt.Key.Key_Minus:
                     if hasattr(self, 'zoom_out'):
                         self.zoom_out()
                     return True
-            elif event.type() == QEvent.Type.KeyRelease:
-                if event.key() == Qt.Key.Key_Control:
-                    self.ctrl_pressed = False
         except Exception as e:
             print(f"Error encountered in eventFilter: {e}")
         return super(CodeEditorWindow, self).eventFilter(obj, event)
@@ -116,7 +119,9 @@ class CodeEditorWindow(Qutepart):
     def _save_font_size(self):
         try:
             import json as _j
-            _p = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "circuit_studio_config.json")
+            # Was dirname(dirname(__file__)), one level above the package,
+            # which is a different file from the one Settings uses.
+            from .app import CONFIG_FILE as _p
             os.makedirs(os.path.dirname(_p), exist_ok=True)
             if os.path.exists(_p):
                 with open(_p, encoding='utf-8') as _f:
@@ -262,8 +267,8 @@ class CodeEditorWindow(Qutepart):
         """Ctrl+] : indent the current line or selection one level."""
         cursor = self.textCursor()
         if not cursor.hasSelection():
-            cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
-            cursor.movePosition(QTextCursor.MoveOperation.EndOfLine,
+            cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+            cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock,
                                 QTextCursor.MoveMode.KeepAnchor)
             self.setTextCursor(cursor)
         self._indenter.onChangeSelectedBlocksIndent(increase=True)
@@ -272,8 +277,8 @@ class CodeEditorWindow(Qutepart):
         """Ctrl+[ : unindent the current line or selection one level."""
         cursor = self.textCursor()
         if not cursor.hasSelection():
-            cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
-            cursor.movePosition(QTextCursor.MoveOperation.EndOfLine,
+            cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+            cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock,
                                 QTextCursor.MoveMode.KeepAnchor)
             self.setTextCursor(cursor)
         self._indenter.onChangeSelectedBlocksIndent(increase=False)
@@ -292,7 +297,19 @@ class EditorWidget(QWidget):
         self.layout.addWidget(self.vimModeIndication)
         
         self.qpart = CodeEditorWindow()
-        self.qpart.vimModeEnabled = False
+        # Read from config rather than hardcoding, so the Settings dialog's
+        # vim_mode checkbox is not decoration on newly created tabs.
+        try:
+            from .app import _load_config as _lc
+            _ed = _lc().get("editor", {})
+            self.qpart.vimModeEnabled  = bool(_ed.get("vim_mode", False))
+            self.qpart.indentWidth     = int(_ed.get("tab_width", 4))
+            self.qpart.completionEnabled = bool(_ed.get("autocomplete", True))
+            if not _ed.get("line_numbers", True) and self.qpart._margins:
+                self.qpart._margins[0].setVisible(False)
+                self.qpart.updateViewport()
+        except Exception:
+            self.qpart.vimModeEnabled = False
         self.layout.addWidget(self.qpart)
 
         self.qpart.vimModeIndicationChanged.connect(self.onVimModeChanged)
@@ -301,10 +318,11 @@ class EditorWidget(QWidget):
         # Double-click-a-word highlights every occurrence (like Mu/VS Code).
         # We own both the error highlight and the word highlight here, because
         # qutepart's setExtraSelections replaces the whole list with one shared
-        # format. _error_sel holds the current red error line (or None); word
+        # format. _error_line holds the current red error line (or None); word
         # matches are recomputed on selection change and rendered together.
-        self._error_sel = None          # (start, length) or None
-        self._debug_sel = None
+        self._error_line = None         # 1-based line number, or None
+        self._debug_line = None
+        self.qpart.textChanged.connect(self._render_extra_selections)
         self._word_match_re = None
         self.qpart.selectionChanged.connect(self._on_selection_changed)
 
@@ -380,41 +398,75 @@ class EditorWidget(QWidget):
             self._word_match_re = None
         self._render_extra_selections()
 
-    def _render_extra_selections(self):
-        from PySide6.QtGui import QColor, QTextCharFormat
+    _F_WORD  = "#3a4a2a"    # subtle olive, like Mu
+    _F_DEBUG = "#1a3a5c"    # blue debug bar
+    _F_ERROR = "#3d1a1a"    # red error line
 
-        sels = []
+    def _sel_for_line(self, line_number: int):
+        """(absolutePosition, length) for a 1-based line, or None."""
+        block = self.qpart.document().findBlockByLineNumber(line_number - 1)
+        if not block.isValid():
+            return None
+        return block.position(), max(block.length() - 1, 1)
+
+    def _render_extra_selections(self):
+        """Paint word matches, the debug line and the error line together.
+
+        qutepart's setExtraSelections() applies one shared
+        _userExtraSelectionFormat to every selection, so routing all three
+        through it made whichever type won the priority test recolour the
+        others. Build the ExtraSelection objects directly instead, each with
+        its own format, and let qutepart compose them with its current-line
+        and bracket selections.
+        """
+        from PySide6.QtGui import QColor, QTextCharFormat
+        from PySide6.QtWidgets import QTextEdit
+
+        def make(pos, length, colour, fg=None, full_width=False):
+            cursor = QTextCursor(self.qpart.document())
+            cursor.setPosition(pos)
+            cursor.setPosition(pos + length, QTextCursor.MoveMode.KeepAnchor)
+            sel = QTextEdit.ExtraSelection()
+            sel.cursor = cursor
+            fmt = QTextCharFormat()
+            fmt.setBackground(QColor(colour))
+            if fg:
+                fmt.setForeground(QColor(fg))
+            if full_width:
+                fmt.setProperty(QTextCharFormat.Property.FullWidthSelection, True)
+            sel.format = fmt
+            return sel
+
+        out = []
         if self._word_match_re is not None:
             text = self.qpart.toPlainText()
             for m in self._word_match_re.finditer(text):
-                sels.append((m.start(), m.end() - m.start()))
+                out.append(make(m.start(), m.end() - m.start(), self._F_WORD))
 
-        if sels:
-            fmt = QTextCharFormat()
-            fmt.setBackground(QColor("#3a4a2a"))   # subtle olive, like Mu
-            self.qpart._userExtraSelectionFormat = fmt
-            if self._error_sel is not None:
-                sels.append(self._error_sel)
-            if self._debug_sel is not None:
-                sels.append(self._debug_sel)
-            self.qpart.setExtraSelections(sels)
-        elif self._debug_sel is not None:
-            fmt = QTextCharFormat()
-            fmt.setBackground(QColor("#1a3a5c"))   # blue debug tint
-            fmt.setForeground(QColor("#58a6ff"))
-            self.qpart._userExtraSelectionFormat = fmt
-            extra = [self._debug_sel]
-            if self._error_sel is not None:
-                extra.append(self._error_sel)
-            self.qpart.setExtraSelections(extra)
-        elif self._error_sel is not None:
-            fmt = QTextCharFormat()
-            fmt.setBackground(QColor("#3d1a1a"))
-            fmt.setForeground(QColor("#ff7b72"))
-            self.qpart._userExtraSelectionFormat = fmt
-            self.qpart.setExtraSelections([self._error_sel])
-        else:
-            self.qpart.setExtraSelections([])
+        # Line numbers, not absolute offsets: offsets captured earlier go
+        # stale after any edit and produced setPosition out-of-range warnings.
+        if self._debug_line:
+            sel = self._sel_for_line(self._debug_line)
+            if sel:
+                out.append(make(*sel, self._F_DEBUG, "#58a6ff", True))
+        if self._error_line:
+            sel = self._sel_for_line(self._error_line)
+            if sel:
+                out.append(make(*sel, self._F_ERROR, "#ff7b72", True))
+
+        try:
+            self.qpart._userExtraSelections = out
+            self.qpart._updateExtraSelections()
+        except AttributeError:
+            self.qpart.setExtraSelections(
+                [(s.cursor.selectionStart(),
+                  s.cursor.selectionEnd() - s.cursor.selectionStart())
+                 for s in out])
+
+    def set_debug_line(self, line_number):
+        """Show or clear the blue executing-line bar. None clears it."""
+        self._debug_line = line_number
+        self._render_extra_selections()
 
     def highlight_error_line(self, line_number: int):
         """Highlight a line red. Coexists with word highlighting."""
@@ -423,8 +475,7 @@ class EditorWidget(QWidget):
         if not block.isValid():
             return
         start = block.position()
-        length = max(block.length() - 1, 1)
-        self._error_sel = (start, length)
+        self._error_line = line_number
         self._render_extra_selections()
         cursor = self.qpart.textCursor()
         cursor.setPosition(start)
@@ -433,7 +484,7 @@ class EditorWidget(QWidget):
 
     def clear_error_highlight(self):
         """Remove error highlighting (leaves any word highlight intact)."""
-        self._error_sel = None
+        self._error_line = None
         self._render_extra_selections()
 
     def highlight_debug_line(self, line_number: int):
@@ -443,8 +494,7 @@ class EditorWidget(QWidget):
         if not block.isValid():
             return
         start = block.position()
-        length = max(block.length() - 1, 1)
-        self._debug_sel = (start, length)
+        self._debug_line = line_number
         self._render_extra_selections()
         cursor = self.qpart.textCursor()
         cursor.setPosition(start)
@@ -453,7 +503,7 @@ class EditorWidget(QWidget):
 
     def clear_debug_highlight(self):
         """Clear debug highlight."""
-        self._debug_sel = None
+        self._debug_line = None
         self._render_extra_selections()
 
     def get_text(self):

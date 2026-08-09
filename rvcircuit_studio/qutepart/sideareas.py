@@ -158,6 +158,10 @@ class MarkArea(QWidget):
 
         for block in qutepart.iterateBlocksFrom(block):
             height = self._qpart.blockBoundingGeometry(block).height()
+            # A wrapped block is several rows tall. Centre marks in its first
+            # row so they line up with the line number, not the middle of the
+            # wrapped text.
+            rowHeight = min(height, self._qpart.cursorRect().height() or height)
             if top > event.rect().bottom():
                 break
             if block.isVisible() and \
@@ -165,11 +169,11 @@ class MarkArea(QWidget):
                 if block.blockNumber() in self._qpart.lintMarks:
                     msgType, msgText = self._qpart.lintMarks[block.blockNumber()]
                     pixMap = self._lintPixmaps[msgType]
-                    yPos = top + ((height - pixMap.height()) / 2)  # centered
-                    painter.drawPixmap(0, yPos, pixMap)
+                    yPos = top + ((rowHeight - pixMap.height()) / 2)
+                    painter.drawPixmap(0, int(yPos), pixMap)
 
                 if self.isBlockMarked(block):
-                    yPos = top + ((height - self._bookmarkPixmap.height()) / 2)  # centered
+                    yPos = top + ((rowHeight - self._bookmarkPixmap.height()) / 2)
                     painter.drawPixmap(0, int(yPos), self._bookmarkPixmap)
 
             top += height

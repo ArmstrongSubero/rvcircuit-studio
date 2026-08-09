@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import re
 
 from .common import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox,
@@ -49,6 +50,39 @@ _BTN = (
 
 def _btn_style(fg=CS_TEXT, dis=_C_DISABLED):
     return _BTN.format(fg=fg, dis=dis)
+
+def _block_at(qpart, margin_widget, event):
+    """
+    Map a click on a margin widget to the text block under the pointer.
+
+    Margins are siblings of the viewport, not ancestors, so mapFrom() cannot
+    be used between them. Round trip through global coordinates instead.
+    cursorForPosition() is wrap aware, which is what makes this correct on
+    wrapped lines.
+
+    Returns a QTextBlock, or None if the click landed below the last line.
+    """
+    from PySide6.QtCore import QPoint
+    try:
+        y = int(event.position().y())
+    except AttributeError:
+        y = int(event.y())
+
+    viewport = qpart.viewport()
+    try:
+        pos = viewport.mapFromGlobal(margin_widget.mapToGlobal(QPoint(0, y)))
+        pos.setX(0)
+    except Exception:
+        pos = QPoint(0, y)
+
+    block = qpart.cursorForPosition(pos).block()
+    if not block.isValid():
+        return None
+    rect = qpart.blockBoundingGeometry(block).translated(qpart.contentOffset())
+    if rect.bottom() < pos.y():
+        return None
+    return block
+
 
 def _fmt_bytes(n: int) -> str:
     if n < 1024:
@@ -246,27 +280,72 @@ class _ConfigPage(QWidget):
     def get_debug_files(self) -> list:
         return [n for n, cb in self._file_checkboxes.items() if cb.isChecked()]
 
-    def get_watch_exprs(self) -> dict:
-        """Parse the watch text into {scope: [expr, ...]}."""
+    _SCOPE_RE = re.compile(r"^([A-Za-z0-9_.\-]+\.py)\s*:\s*(.+)$")
+
+    @staticmethod
+    def _validate(expr: str):
+        """Return None if expr is a usable Python expression, else a reason."""
+        # Expressions are injected inline into generated code, so a comment or
+        # a line break would swallow the rest of the statement even though
+        # compile() accepts both on their own.
+        if "#" in expr:
+            return "cannot contain a comment"
+        if "\n" in expr or "\r" in expr or "\\" in expr:
+            return "cannot contain a line break"
+        try:
+            compile(expr, "<watch>", "eval")
+            return None
+        except SyntaxError as exc:
+            return exc.msg
+        except (ValueError, RecursionError) as exc:
+            return str(exc)
+
+    def _parse_expr_lines(self, text: str, scoped: bool):
+        """
+        Split a config text box into {scope: [expr, ...]} plus a list of
+        (line, reason) for anything that will not compile.
+        """
         result: dict[str, list] = {"": []}
-        for line in self._watch_edit.toPlainText().splitlines():
+        bad: list = []
+        for line in text.splitlines():
             line = line.strip()
             if not line:
                 continue
-            if ":" in line:
-                scope, expr = line.split(":", 1)
-                scope = scope.strip()
-                expr  = expr.strip()
-                if expr:
-                    result.setdefault(scope, []).append(expr)
-            else:
-                result[""].append(line)
-        return result
+            scope, expr = "", line
+            if scoped:
+                # Only treat a colon as a scope separator when the prefix is a
+                # filename. Slices, dict literals, lambdas and f-string format
+                # specs all contain colons and are not scopes.
+                m = self._SCOPE_RE.match(line)
+                if m:
+                    scope, expr = m.group(1), m.group(2).strip()
+            if not expr:
+                continue
+            reason = self._validate(expr)
+            if reason:
+                bad.append((line, reason))
+                continue
+            result.setdefault(scope, []).append(expr)
+        return result, bad
+
+    def get_watch_exprs(self) -> dict:
+        """Parse the watch text into {scope: [expr, ...]}."""
+        return self._parse_expr_lines(self._watch_edit.toPlainText(), True)[0]
 
     def get_cond_breakpoints(self) -> dict:
         """Parse conditional breakpoints into {scope: [expr, ...]}."""
-        exprs = [l.strip() for l in self._cbp_edit.toPlainText().splitlines() if l.strip()]
-        return {"": exprs}
+        return self._parse_expr_lines(self._cbp_edit.toPlainText(), False)[0]
+
+    def get_invalid_exprs(self) -> list:
+        """Return [(label, line, reason)] for every unusable expression."""
+        bad = []
+        for label, text, scoped in (
+            ("Watch", self._watch_edit.toPlainText(), True),
+            ("Conditional breakpoint", self._cbp_edit.toPlainText(), False),
+        ):
+            for line, reason in self._parse_expr_lines(text, scoped)[1]:
+                bad.append((label, line, reason))
+        return bad
 
 class _DebugToolbar(QWidget):
     sig_restart         = Signal()
@@ -371,6 +450,8 @@ class _DebugToolbar(QWidget):
         self.btn_restart.setEnabled(True)
 
 class DebuggerPanel(QWidget):
+    sig_session_ended = Signal()
+    sig_status        = Signal(str, str)
     """
     Full debugger UI panel -- drop into bottom_stack as index 2.
 
@@ -393,6 +474,15 @@ class DebuggerPanel(QWidget):
         self._debugger_halted:  bool      = False
         self._serial_buf:       str       = ""
 
+        # Handshake state. _raw_buf accumulates serial regardless of session
+        # state, so the start sequence can wait on real board output.
+        self._raw_buf:      str  = ""
+        self._wait_pattern       = None
+        self._wait_cb            = None
+        self._wait_timer         = None
+        self._start_attempts     = 0
+        self._pending_start      = None
+
         self._gutter_connections: dict = {}
 
         self._build_ui()
@@ -400,6 +490,13 @@ class DebuggerPanel(QWidget):
     def set_main_editor(self, editor):
         """Store reference to the main editor (survives widget reparenting)."""
         self._main_editor = editor
+
+    def _status(self, text: str, color: str = CS_TEXT_MUTED):
+        """Set the status on the panel toolbar and mirror it somewhere the
+        user can actually see. DebuggerPanel is never added to a layout, so
+        _toolbar.set_status() alone goes to a hidden widget."""
+        self._toolbar.set_status(text, color)
+        self.sig_status.emit(text, color)
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -534,6 +631,10 @@ class DebuggerPanel(QWidget):
         Called with every chunk of serial data from repl_panel.data_received.
         Accumulates into a buffer and extracts debug state JSON blocks.
         """
+        # The handshake matcher must see every chunk, including the output the
+        # board produces before a session is running.
+        self._raw_feed(text)
+
         # This is wired to every serial chunk, including normal (non-debug)
         # REPL output. Without a cap, _serial_buf would grow for the whole
         # session on a streaming board. Only accumulate while a debug session
@@ -564,9 +665,9 @@ class DebuggerPanel(QWidget):
             self._debugger_halted = latest.get("h", False)
 
             if self._debugger_halted:
-                self._toolbar.set_status("Halted", CS_WARNING)
+                self._status("Halted", CS_WARNING)
             else:
-                self._toolbar.set_status("Running", _C_START)
+                self._status("Running", _C_START)
 
             self._refresh_debug_view()
             self._update_toolbar_state()
@@ -575,8 +676,12 @@ class DebuggerPanel(QWidget):
         if self._debug_history and self._serial_buf.endswith("\n>>> "):
             self._debugger_running = False
             self._debugger_halted  = False
-            self._toolbar.set_status("Stopped", _C_STOP)
+            self._status("Stopped", _C_STOP)
             self._update_toolbar_state()
+            # The program finished on its own. Without this the debug bar stays
+            # live and the next Step writes [S] into a bare REPL, which the
+            # board evaluates as a name and rejects.
+            self.sig_session_ended.emit()
 
     def install_gutter(self, qpart, filename: str):
         """
@@ -599,42 +704,139 @@ class DebuggerPanel(QWidget):
         except (AttributeError, IndexError):
             return
 
+        # qutepart's own Bookmarks class connects MarkArea.blockClicked to its
+        # bookmark toggle, and bookmarks share the same one bit margin value we
+        # use for breakpoints. Two handlers writing the same bit is why clicks
+        # sometimes appeared to do nothing. Take sole ownership of the click.
+        try:
+            mark_area.blockClicked.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+
         def _on_gutter_click(block):
             self._toggle_breakpoint(qpart, block, filename)
 
-        mark_area.blockClicked.connect(_on_gutter_click)
+        from PySide6.QtCore import QObject, QEvent
 
-        line_num_filter = None
+        class _MarginClickFilter(QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == QEvent.Type.MouseButtonPress:
+                    from PySide6.QtCore import Qt as _Qt
+                    if event.button() == _Qt.MouseButton.LeftButton:
+                        block = _block_at(qpart, obj, event)
+                        if block is not None:
+                            _on_gutter_click(block)
+                            # Consume it. Letting it through would also run
+                            # MarginBase.mousePressEvent and re-emit
+                            # blockClicked, giving a second toggle.
+                            return True
+                return False
+
+        filters = []
+        for idx in (0, 1):   # LineNumberArea, MarkArea
+            try:
+                area = qpart._margins[idx]
+            except (AttributeError, IndexError):
+                continue
+            flt = _MarginClickFilter(area)
+            area.installEventFilter(flt)
+            filters.append((area, flt))
+
+        self._gutter_connections[qpart_id] = (qpart, filename, _on_gutter_click, filters)
+
+        self._sync_breakpoint_marks(qpart)      # legacy '# BULLET' comments
+        self._restore_breakpoints(qpart, filename)
+
+    # ------------------------------------------------------------------ #
+    #  Breakpoint persistence                                             #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _bp_key(path: str) -> str:
+        """Config key for a file. Absolute and case-normalised so the same
+        file opened by two routes maps to one entry."""
         try:
-            line_num_area = qpart._margins[0]
-            from PySide6.QtCore import QObject, QEvent
-            from PySide6.QtCore import QPoint
+            return os.path.normcase(os.path.abspath(path))
+        except Exception:
+            return path
 
-            class _LineNumClickFilter(QObject):
-                def eventFilter(self, obj, event):
-                    if event.type() == QEvent.Type.MouseButtonPress:
-                        from PySide6.QtCore import Qt as _Qt
-                        if event.button() == _Qt.MouseButton.LeftButton:
-                            cursor = qpart.cursorForPosition(QPoint(0, int(event.position().y())))
-                            block = cursor.block()
-                            rect = qpart.blockBoundingGeometry(block).translated(
-                                qpart.contentOffset())
-                            if rect.bottom() >= event.position().y():
-                                _on_gutter_click(block)
-                    return False  # let the event propagate normally
+    def _load_saved_breakpoints(self) -> dict:
+        try:
+            from .app import _load_config
+            return _load_config().get("breakpoints", {}) or {}
+        except Exception:
+            return {}
 
-            line_num_filter = _LineNumClickFilter(line_num_area)
-            line_num_area.installEventFilter(line_num_filter)
-        except (AttributeError, IndexError):
+    def save_breakpoints(self):
+        """Write current gutter marks to the config, keyed by file path.
+
+        Marks live in the block user state, which does not survive closing a
+        tab or restarting the app.
+        """
+        try:
+            from .app import _load_config, _save_config
+        except Exception:
+            return
+        try:
+            cfg = _load_config()
+            stored = cfg.get("breakpoints", {}) or {}
+            for entry in list(self._gutter_connections.values()):
+                qpart, path = entry[0], entry[1]
+                if not path or path == "untitled.py":
+                    continue
+                key = self._bp_key(path)
+                lines = sorted(self._marks_of(qpart))
+                if lines:
+                    stored[key] = lines
+                else:
+                    stored.pop(key, None)
+            cfg["breakpoints"] = stored
+            _save_config(cfg)
+        except Exception:
             pass
 
-        self._gutter_connections[qpart_id] = (qpart, filename, _on_gutter_click, line_num_filter)
+    def _marks_of(self, qpart) -> set:
+        """1-based line numbers currently marked in a qpart's gutter."""
+        out = set()
+        try:
+            mark_area = qpart._margins[1]
+            block = qpart.document().begin()
+            while block.isValid():
+                if mark_area.getBlockValue(block):
+                    out.add(block.blockNumber() + 1)
+                block = block.next()
+        except (AttributeError, IndexError, RuntimeError):
+            pass
+        return out
 
-        self._sync_breakpoint_marks(qpart)
+    def _restore_breakpoints(self, qpart, path: str):
+        """Re-apply saved marks for *path*, skipping lines that are no longer
+        steppable because the file changed since they were saved."""
+        if not path or path == "untitled.py":
+            return
+        lines = self._load_saved_breakpoints().get(self._bp_key(path))
+        if not lines:
+            return
+        try:
+            steppable = identify_steppable_lines(qpart.toPlainText())
+            mark_area = qpart._margins[1]
+            doc = qpart.document()
+            for n in lines:
+                if (n - 1) not in steppable:
+                    continue
+                block = doc.findBlockByNumber(n - 1)
+                if block.isValid():
+                    mark_area.setBlockValue(block, 1)
+            mark_area.update()
+        except (AttributeError, IndexError, RuntimeError):
+            pass
 
     def _sync_breakpoint_marks(self, qpart):
-        """Scan the editor text for # ● comments and set the corresponding
-        gutter marks so the red dots are visible even after a file reload."""
+        """Import legacy '# BULLET' comment markers into gutter marks.
+
+        Additive on purpose: new breakpoints are stored only in the gutter, so
+        this must not clear a mark just because the line has no comment.
+        """
         try:
             mark_area = qpart._margins[1]
         except (AttributeError, IndexError):
@@ -642,29 +844,51 @@ class DebuggerPanel(QWidget):
         doc = qpart.document()
         block = doc.begin()
         while block.isValid():
-            if "# \u25cf" in block.text():   # ● = U+25CF
+            if "# \u25cf" in block.text():   # U+25CF
                 mark_area.setBlockValue(block, 1)
-            else:
-                mark_area.setBlockValue(block, 0)
             block = block.next()
         mark_area.update()
+
+    def collect_breakpoints(self) -> dict:
+        """
+        Read gutter marks from every open editor and return
+        {filename: set(1-based line numbers)}.
+
+        This is the source of truth for breakpoints now. Nothing is written
+        into the user's file.
+        """
+        out: dict[str, set] = {}
+        for entry in list(self._gutter_connections.values()):
+            qpart, filename = entry[0], entry[1]
+            try:
+                mark_area = qpart._margins[1]
+                doc = qpart.document()
+            except (AttributeError, IndexError, RuntimeError):
+                continue
+            lines = set()
+            block = doc.begin()
+            while block.isValid():
+                try:
+                    if mark_area.getBlockValue(block):
+                        lines.add(block.blockNumber() + 1)
+                except (RuntimeError, AttributeError):
+                    break
+                block = block.next()
+            if lines:
+                out.setdefault(os.path.basename(filename), set()).update(lines)
+        return out
 
     def uninstall_gutter(self, qpart):
         """Disconnect the gutter signal for a Qutepart instance being closed."""
         qpart_id = id(qpart)
         if qpart_id not in self._gutter_connections:
             return
-        _, _, slot, line_num_filter = self._gutter_connections.pop(qpart_id)
-        try:
-            mark_area = qpart._margins[1]
-            mark_area.blockClicked.disconnect(slot)
-        except (AttributeError, IndexError, RuntimeError):
-            pass
-        if line_num_filter is not None:
+        self.save_breakpoints()
+        _, _, _slot, filters = self._gutter_connections.pop(qpart_id)
+        for area, flt in filters or ():
             try:
-                line_num_area = qpart._margins[0]
-                line_num_area.removeEventFilter(line_num_filter)
-            except (AttributeError, IndexError, RuntimeError):
+                area.removeEventFilter(flt)
+            except (AttributeError, RuntimeError):
                 pass
 
     def _toggle_breakpoint(self, qpart, block, filename: str):
@@ -672,38 +896,22 @@ class DebuggerPanel(QWidget):
         Toggle a # ● breakpoint comment on the clicked block after validating
         that the line is steppable.
         """
-        line_text = block.text()
-        line_num  = block.blockNumber()  # 0-based
+        line_num = block.blockNumber()  # 0-based
 
-        code = qpart.toPlainText()
-        steppable = identify_steppable_lines(code)
+        steppable = identify_steppable_lines(qpart.toPlainText())
         if line_num not in steppable:
             return  # not a steppable line -- ignore the click
 
-        if "# ●" in line_text or "# ●" in line_text.lower():
-            new_text = line_text.replace(" # ●", "").replace("# ●", "").rstrip()
-            marked = False
-        else:
-            new_text = line_text.rstrip() + " # ●"
-            marked = True
-
-        cursor = qpart.textCursor()
-        cursor.setPosition(block.position())
-        cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
-        cursor.movePosition(
-            QTextCursor.MoveOperation.EndOfLine,
-            QTextCursor.MoveMode.KeepAnchor
-        )
-        cursor.insertText(new_text)
-        qpart.setTextCursor(cursor)
-
         try:
             mark_area = qpart._margins[1]
-            block_after = qpart.document().findBlockByLineNumber(line_num)
-            mark_area.setBlockValue(block_after, 1 if marked else 0)
-            mark_area.update()
         except (AttributeError, IndexError):
-            pass
+            return
+
+        # Breakpoints live in the gutter, never in the user's source.
+        marked = bool(mark_area.getBlockValue(block))
+        mark_area.setBlockValue(block, 0 if marked else 1)
+        mark_area.update()
+        self.save_breakpoints()
 
     def _refresh_file_list(self):
         if not self._drive or not os.path.isdir(self._drive):
@@ -740,43 +948,121 @@ class DebuggerPanel(QWidget):
             except Exception:
                 pass
 
+    # ------------------------------------------------------------------ #
+    #  Serial handshake                                                   #
+    # ------------------------------------------------------------------ #
+
+    _RAW_BUF_CAP  = 8192
+    _MAX_INTERRUPT_ATTEMPTS = 6
+    _PROMPT       = ">>> "
+
+    def _raw_feed(self, text: str):
+        """Accumulate serial output and satisfy any pending _wait_for()."""
+        self._raw_buf += text
+        if len(self._raw_buf) > self._RAW_BUF_CAP:
+            self._raw_buf = self._raw_buf[-2048:]
+
+        if self._wait_pattern and self._wait_pattern in self._raw_buf:
+            cb = self._wait_cb
+            self._clear_wait()
+            if cb:
+                cb(True)
+
+    def _wait_for(self, pattern: str, timeout_ms: int, on_done):
+        """Call on_done(True) when *pattern* appears, or on_done(False) on
+        timeout. Only one wait can be outstanding at a time."""
+        self._clear_wait()
+        self._raw_buf = ""
+        self._wait_pattern = pattern
+        self._wait_cb = on_done
+        self._wait_timer = QTimer(self)
+        self._wait_timer.setSingleShot(True)
+        self._wait_timer.timeout.connect(self._on_wait_timeout)
+        self._wait_timer.start(timeout_ms)
+
+    def _on_wait_timeout(self):
+        cb = self._wait_cb
+        self._clear_wait()
+        if cb:
+            cb(False)
+
+    def _clear_wait(self):
+        self._wait_pattern = None
+        self._wait_cb = None
+        if self._wait_timer is not None:
+            try:
+                self._wait_timer.stop()
+                self._wait_timer.deleteLater()
+            except RuntimeError:
+                pass
+            self._wait_timer = None
+
+    def _tx(self, data: bytes):
+        if self._repl and self._repl.is_connected:
+            self._repl._write_bytes(data)
+
+    def _start_failed(self, title: str, detail: str):
+        from PySide6.QtWidgets import QMessageBox
+        self._clear_wait()
+        self._pending_start = None
+        self._debugger_running = False
+        self._debugger_halted = False
+        self._status("Failed", _C_STOP)
+        self._update_toolbar_state()
+        main = self._main_editor
+        if main and hasattr(main, "_debug_bar"):
+            main._debug_bar.setVisible(False)
+        if main and hasattr(main, "repl_panel"):
+            main.repl_panel._debug_mode = False
+        if self._drive:
+            cleanup_debug_files(self._drive)
+        self._stack.setCurrentIndex(0)
+        QMessageBox.warning(self, title, detail)
+
+    # ------------------------------------------------------------------ #
+
     def _on_start_clicked(self):
+        from PySide6.QtWidgets import QMessageBox
+
         if not self._drive or not os.path.isdir(self._drive):
-            from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "No Drive", "Please connect a CIRCUITPY board first.")
             return
         if not self._repl or not self._repl.is_connected:
-            from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "No Serial", "Please connect to the REPL serial port first.")
             return
 
         debug_files = self._config_page.get_debug_files()
         if not debug_files:
-            from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "No Files", "Select at least one file to debug.")
             return
 
-        self._save_drive_tabs()
-
-        all_files    = get_all_python_files(self._drive)
-        watch_exprs  = self._config_page.get_watch_exprs()
-        cond_bps     = self._config_page.get_cond_breakpoints()
-
-        try:
-            write_debug_files(
-                self._drive, all_files, debug_files,
-                watch_exprs, cond_bps
+        invalid = self._config_page.get_invalid_exprs()
+        if invalid:
+            detail = "\n".join(f"  {kind}: {line}\n      {why}"
+                               for kind, line, why in invalid)
+            QMessageBox.warning(
+                self, "Invalid Expression",
+                "These expressions are not valid Python and would break the "
+                f"instrumented copy:\n\n{detail}\n\nFix or remove them, then "
+                "start again."
             )
-        except Exception as exc:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.critical(self, "Instrumentation Error", str(exc))
             return
 
-        self._stack.setCurrentIndex(1)
-        self._start_debug_session(all_files)
+        self._save_drive_tabs()
+        self._begin_start(debug_files)
 
-    def _start_debug_session(self, all_python_files: list):
-        """Reset state and kick the board into the debug session."""
+    def _begin_start(self, debug_files: list):
+        """Phase 1: get the board to a REPL prompt before touching the drive.
+
+        Writing the instrumented files first is what the old code did, and on
+        a board that is running user code every one of those writes triggers a
+        CircuitPython auto reload, restarting code.py in the middle of the
+        start sequence. Auto reload is suppressed while the board sits at the
+        REPL, so interrupt first, then write.
+        """
+        self._pending_start = {"debug_files": list(debug_files)}
+        self._start_attempts = 0
+
         self._debug_history   = []
         self._history_index   = 0
         self._serial_buf      = ""
@@ -786,33 +1072,143 @@ class DebuggerPanel(QWidget):
         self._watch_display.clear()
         self._code_view.clear_view()
         self._file_label.setText("")
-        self._toolbar.set_status("Starting...", CS_TEXT_MUTED)
+        self._stack.setCurrentIndex(1)
+        self._status("Interrupting board...", CS_TEXT_MUTED)
         self._update_toolbar_state()
 
-        has_code_py = "code.py" in all_python_files
-        entry = "ide_debug_code" if has_code_py else "ide_debug_main"
+        self._interrupt_attempt()
 
-        self._send_start_sequence(entry)
+    def _interrupt_attempt(self):
+        if self._start_attempts >= self._MAX_INTERRUPT_ATTEMPTS:
+            self._start_failed(
+                "Could Not Reach the REPL",
+                "The board never returned a >>> prompt after repeated Ctrl+C.\n\n"
+                "This usually means code.py is inside a long blocking call "
+                "(display init on a large panel is a common one) or the serial "
+                "port is connected to a different device.\n\n"
+                "Try again, or temporarily replace code.py with a short program."
+            )
+            return
 
-    def _send_start_sequence(self, entry_module: str):
-        """Send the Ctrl+C / Ctrl+D / import sequence asynchronously."""
-        steps = [
-            (0,    b"\x03"),   # Ctrl+C
-            (120,  b"\x03"),
-            (240,  b"\x03"),
-            (500,  b"\x04"),   # Ctrl+D (soft reboot)
-            (1100, b"\x03"),
-            (1220, b"\x03"),
-            (1340, b"\x03"),
-            (1700, f"from {entry_module} import *\r".encode()),
-        ]
+        self._start_attempts += 1
+        self._status(
+            f"Interrupting board ({self._start_attempts})...", CS_TEXT_MUTED
+        )
+        self._tx(b"\x03")
+        # A second Ctrl+C shortly after catches boards that were mid line.
+        QTimer.singleShot(80, lambda: self._tx(b"\x03"))
+        QTimer.singleShot(160, lambda: self._tx(b"\r"))
+        self._wait_for(self._PROMPT, 1500, self._on_prompt_result)
 
-        def _fire(step_bytes):
-            if self._repl and self._repl.is_connected:
-                self._repl._write_bytes(step_bytes)
+    def _on_prompt_result(self, ok: bool):
+        if self._pending_start is None:
+            return          # session was cancelled while we waited
+        if not ok:
+            self._interrupt_attempt()
+            return
+        self._write_and_import()
 
-        for delay_ms, data in steps:
-            QTimer.singleShot(delay_ms, lambda d=data: _fire(d))
+    def _write_and_import(self):
+        """Phase 2: at the prompt, write instrumentation, then import it."""
+        from PySide6.QtWidgets import QMessageBox
+
+        pending = self._pending_start
+        if pending is None:
+            return
+        debug_files = pending["debug_files"]
+
+        all_files   = get_all_python_files(self._drive)
+        watch_exprs = self._config_page.get_watch_exprs()
+        cond_bps    = self._config_page.get_cond_breakpoints()
+        breakpoints = self.collect_breakpoints()
+
+        self._status("Writing instrumentation...", CS_TEXT_MUTED)
+        try:
+            report = write_debug_files(
+                self._drive, all_files, debug_files,
+                watch_exprs, cond_bps, breakpoints=breakpoints,
+            )
+        except Exception as exc:
+            self._start_failed("Instrumentation Error", str(exc))
+            return
+
+        bad = report.get("unparseable") or {}
+        if bad:
+            lines = "\n".join(f"  {f}: {why}" for f, why in bad.items())
+            self._start_failed(
+                "Cannot Instrument",
+                "These files could not be compiled, so no debug points were "
+                f"inserted:\n\n{lines}\n\nFix the error and start again."
+            )
+            return
+
+        broken = report.get("broken") or {}
+        if broken:
+            lines = "\n".join(f"  {f}: {why}" for f, why in broken.items())
+            self._start_failed(
+                "Instrumentation Produced Invalid Code",
+                "Your source compiles, but the instrumented copy does not:\n\n"
+                f"{lines}\n\nThis is usually caused by a malformed watch "
+                "expression or conditional breakpoint. Check the Watch and "
+                "Conditional Breakpoint boxes, then start again."
+            )
+            return
+
+        if not report.get("breakpoints"):
+            # Deliberately not a modal. A dialog here would block the event
+            # loop in the middle of the handshake.
+            self._status(
+                "No breakpoints set - will halt on the first line", CS_WARNING
+            )
+
+        pending["entry"] = (
+            "ide_debug_code" if "code.py" in all_files else "ide_debug_main"
+        )
+        # Let the board's filesystem settle before importing.
+        QTimer.singleShot(400, self._send_import)
+
+    def _send_import(self):
+        pending = self._pending_start
+        if pending is None:
+            return
+        self._status("Clearing module cache...", CS_TEXT_MUTED)
+        # A second `from ide_debug_code import *` in the same board session is
+        # a no-op, because the module is already in sys.modules. It produces no
+        # output and no start marker. Drop the cached copies first.
+        # Written as one simple statement so the REPL does not go into
+        # continuation mode waiting for a blank line.
+        self._tx(
+            b"import sys; [sys.modules.pop(k, None) for k in list(sys.modules)"
+            b" if k.startswith('ide_debug_')]\r"
+        )
+        self._wait_for(self._PROMPT, 3000, self._on_purge_result)
+
+    def _on_purge_result(self, ok: bool):
+        pending = self._pending_start
+        if pending is None:
+            return
+        # Not fatal if the purge did not confirm; a cold first run has nothing
+        # cached anyway, and the import below is the real test.
+        entry = pending.get("entry", "ide_debug_code")
+        self._status("Starting session...", CS_TEXT_MUTED)
+        self._tx(f"from {entry} import *\r".encode())
+        self._wait_for(DEBUG_START, 10000, self._on_session_started)
+
+    def _on_session_started(self, ok: bool):
+        if self._pending_start is None:
+            return
+        if not ok:
+            self._start_failed(
+                "Debug Session Did Not Start",
+                "The board accepted the import but never printed the debug "
+                "start marker within 10 seconds.\n\n"
+                "If the file does a lot of work before its first statement, "
+                "give it another try. Otherwise check the REPL for a traceback."
+            )
+            return
+        self._pending_start = None
+        self._status("Running", _C_START)
+        self._update_toolbar_state()
 
     def _send(self, signal: str):
         """Send a debug protocol signal over serial."""
@@ -820,40 +1216,27 @@ class DebuggerPanel(QWidget):
             self._repl._write_bytes((signal + "\r").encode())
 
     def _on_restart(self):
-        all_files = get_all_python_files(self._drive) if self._drive else []
+        if not self._drive or not os.path.isdir(self._drive):
+            return
+        if not self._repl or not self._repl.is_connected:
+            return
+
+        all_files = get_all_python_files(self._drive)
         debug_files = self._config_page.get_debug_files()
         if not debug_files:
             debug_files = [f for f in all_files if f == "code.py"] or all_files[:1]
 
-        main = self._main_editor
-        if main and hasattr(main, '_save_drive_tabs'):
-            pass  # tabs auto-saved by _save_drive_tabs below
         self._save_drive_tabs()
-        try:
-            watch_exprs = self._config_page.get_watch_exprs()
-            cond_bps = self._config_page.get_cond_breakpoints()
-            write_debug_files(self._drive, all_files, debug_files,
-                              watch_exprs, cond_bps)
-        except Exception:
-            pass
-
-        self._debug_history   = []
-        self._history_index   = 0
-        self._serial_buf      = ""
-        self._debugger_halted = False
-        self._debugger_running = True
-        self._watch_display.clear()
-        self._code_view.clear_view()
-        has_code_py = "code.py" in all_files
-        entry = "ide_debug_code" if has_code_py else "ide_debug_main"
-        self._send_start_sequence(entry)
+        self._begin_start(debug_files)
 
     def _on_stop(self):
+        self._clear_wait()
+        self._pending_start = None
         if self._repl and self._repl.is_connected:
             self._repl._write_bytes(b"\x03")
         self._debugger_running = False
         self._debugger_halted  = False
-        self._toolbar.set_status("Stopped", _C_STOP)
+        self._status("Stopped", _C_STOP)
         self._update_toolbar_state()
 
         main = self._main_editor
@@ -872,19 +1255,19 @@ class DebuggerPanel(QWidget):
 
     def _on_step(self):
         self._debugger_halted = False
-        self._toolbar.set_status("Running", _C_START)
+        self._status("Running", _C_START)
         self._update_toolbar_state()
         self._send(DEBUG_SIGNAL_S)
 
     def _on_continue_log(self):
         self._debugger_halted = False
-        self._toolbar.set_status("Running (logging)", _C_START)
+        self._status("Running (logging)", _C_START)
         self._update_toolbar_state()
         self._send(DEBUG_SIGNAL_CW)
 
     def _on_continue(self):
         self._debugger_halted = False
-        self._toolbar.set_status("Running", _C_START)
+        self._status("Running", _C_START)
         self._update_toolbar_state()
         self._send(DEBUG_SIGNAL_CO)
 

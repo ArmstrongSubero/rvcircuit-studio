@@ -42,6 +42,28 @@ def detect_circuitpy():
         return _detect_linux()
     return None
 
+_ERR_MODE_SET = False
+
+
+def _suppress_disk_dialogs(kernel32):
+    """Stop the "There is no disk in the drive" modal that an empty card
+    reader raises on every probe, which is every 2 seconds.
+
+    Set once for the process rather than saved and restored, since we never
+    want that dialog and the polling thread would race the restore.
+    """
+    global _ERR_MODE_SET
+    if _ERR_MODE_SET:
+        return
+    try:
+        SEM_FAILCRITICALERRORS = 0x0001
+        SEM_NOOPENFILEERRORBOX = 0x8000
+        kernel32.SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX)
+        _ERR_MODE_SET = True
+    except Exception:
+        _ERR_MODE_SET = True   # do not retry every poll
+
+
 def _detect_windows():
     """Enumerate mounted drive letters and check each volume name via ctypes.
     Uses the logical-drive bitmask to skip absent letters and guards each probe
@@ -64,6 +86,7 @@ def _detect_windows():
         pass
 
     try:
+        _suppress_disk_dialogs(kernel32)
         drives_mask = kernel32.GetLogicalDrives()
     except Exception:
         drives_mask = 0  # 0 => probe all letters below
@@ -284,7 +307,15 @@ class BoardWatcher(QObject):
         else:
             new_status = BoardStatus.DISCONNECTED
 
-        if new_status != BoardStatus.DISCONNECTED and self._status == BoardStatus.DISCONNECTED:
+        # Emit board_connected on the first sighting, and again when a
+        # PARTIAL board finally exposes its serial port. Without the second
+        # case the REPL never auto-connects, which is the normal ordering on
+        # Windows where the drive mounts before the COM port enumerates.
+        first_sight = (new_status != BoardStatus.DISCONNECTED
+                       and self._status == BoardStatus.DISCONNECTED)
+        port_appeared = (new_status == BoardStatus.CONNECTED
+                         and self._status == BoardStatus.PARTIAL)
+        if first_sight or port_appeared:
             self._drive_path = drive
             self._repl_port  = port or ""
             self.board_connected.emit(drive, port or "")
@@ -327,7 +358,7 @@ def read_boot_out(drive_path: str) -> dict:
     except Exception:
         return {}
 
-    result = {"raw": raw.strip(), "version": "", "major": "9",
+    result = {"raw": raw.strip(), "version": "", "major": "",
               "board": "", "board_id": "", "outdated": False}
 
     m = _re.search(

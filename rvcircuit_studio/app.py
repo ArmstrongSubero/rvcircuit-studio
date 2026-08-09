@@ -25,12 +25,87 @@ from .utils import _fixSysPath
 
 IDE_ROOT = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
 
+
+def _user_data_dir() -> str:
+    """Per-user writable directory for config, state and custom snippets.
+
+    IDE_ROOT is inside the app bundle once frozen. On macOS writing there
+    breaks the code signature and is blocked outright under app translocation,
+    so every setting change was silently discarded in the shipped build.
+    """
+    try:
+        from PySide6.QtCore import QStandardPaths
+        # GenericDataLocation, not AppDataLocation: the latter appends
+        # QApplication.applicationName(), which is unset at import time and
+        # would make the path depend on how the app was launched.
+        base = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.GenericDataLocation)
+    except Exception:
+        base = ""
+    if not base:
+        base = os.path.join(os.path.expanduser("~"), ".rvcircuitstudio")
+    else:
+        base = os.path.join(base, "RV Circuit Studio")
+    try:
+        os.makedirs(base, exist_ok=True)
+    except OSError:
+        base = os.path.join(os.path.expanduser("~"), ".rvcircuitstudio")
+        os.makedirs(base, exist_ok=True)
+    return base
+
+
+USER_DATA_DIR = _user_data_dir()
+BUNDLED_DATA_DIR = os.path.join(IDE_ROOT, "data")
+
+
+def _migrate_legacy(name: str):
+    """Copy a file from the old in-package location once, if present."""
+    new = os.path.join(USER_DATA_DIR, name)
+    if os.path.exists(new):
+        return
+    for old_dir in (BUNDLED_DATA_DIR,
+                    os.path.join(os.path.dirname(IDE_ROOT), "data")):
+        old = os.path.join(old_dir, name)
+        if os.path.exists(old):
+            try:
+                import shutil
+                shutil.copyfile(old, new)
+            except OSError:
+                pass
+            return
+
+
+for _f in ("circuit_studio_config.json", "circuit_studio_state.json",
+           "snippets.json"):
+    _migrate_legacy(_f)
+
+
 # Set to the real registered family name once the bundled font loads at
 # startup. Other modules read this so they request a name Qt actually has.
 MONO_FONT_FAMILY = "JetBrains Mono NL"
-DATA_DIR  = os.path.join(IDE_ROOT, "data")
+DATA_DIR  = USER_DATA_DIR
 CONFIG_FILE = os.path.join(DATA_DIR, "circuit_studio_config.json")
 STATE_FILE  = os.path.join(DATA_DIR, "circuit_studio_state.json")
+SNIPPETS_FILE = os.path.join(DATA_DIR, "snippets.json")
+
+
+def _find_bundled_snippets() -> str:
+    """Locate the read-only default snippets.
+
+    Under PyInstaller the add-data flag puts this at
+    _MEIPASS/rvcircuit_studio/snippets.json, while icons and font land at the
+    _MEIPASS root, so both layouts have to be checked.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in (os.path.join(IDE_ROOT, "rvcircuit_studio", "snippets.json"),
+                 os.path.join(IDE_ROOT, "snippets.json"),
+                 os.path.join(here, "snippets.json")):
+        if os.path.exists(cand):
+            return cand
+    return os.path.join(here, "snippets.json")
+
+
+BUNDLED_SNIPPETS = _find_bundled_snippets()
 
 def get_ide_root():
     return IDE_ROOT
@@ -227,6 +302,9 @@ def main():
     time.sleep(0.3)
 
     def on_close(event):
+        if not editor.confirm_close():
+            event.ignore()
+            return
         editor.save_editor_state()
         # Stop the board-detection polling thread so it doesn't fire after
         # widgets are destroyed.
@@ -259,6 +337,21 @@ def main():
             if drive and os.path.isdir(drive):
                 from .cp_debugger import cleanup_debug_files
                 cleanup_debug_files(drive)
+        except Exception:
+            pass
+        try:
+            editor.terminate_editors()
+        except Exception:
+            pass
+        # STATE_FILE was read at startup and never written by anything, so
+        # window geometry never survived a restart.
+        try:
+            geo = window.normalGeometry()
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump({"window_maximized": window.isMaximized(),
+                           "window_x": geo.x(),  "window_y": geo.y(),
+                           "window_width": geo.width(),
+                           "window_height": geo.height()}, f)
         except Exception:
             pass
         config = _load_config()

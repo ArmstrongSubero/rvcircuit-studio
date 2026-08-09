@@ -20,7 +20,12 @@ class SnippetManager:
 
     def __init__(self, parent_widget, editor_widget, snippet_filename=None):
         if snippet_filename is None:
-            snippet_filename = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snippets.json")
+            # User snippets live in the writable per-user directory. The copy
+            # inside the package is read-only defaults; writing there fails
+            # silently in a signed app bundle.
+            from .app import SNIPPETS_FILE, BUNDLED_SNIPPETS
+            snippet_filename = (SNIPPETS_FILE if os.path.exists(SNIPPETS_FILE)
+                                else BUNDLED_SNIPPETS)
         if SnippetManager.active_instance:
             prev_layout = SnippetManager.active_instance.container.layout()
             for i in reversed(range(prev_layout.count())):
@@ -117,13 +122,20 @@ class SnippetManager:
                 snippet_code = snippet_item.data(0, Qt.UserRole)
                 snippets_data[snippet_name] = snippet_code
             data[category_name] = snippets_data
-        tmp_path = self.SNIPPET_FILENAME + ".tmp"
+        # Always write to the user location, even when the defaults were
+        # loaded from the read-only copy inside the package.
+        try:
+            from .app import SNIPPETS_FILE as target
+        except Exception:
+            target = self.SNIPPET_FILENAME
+        tmp_path = target + ".tmp"
         try:
             with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp_path, self.SNIPPET_FILENAME)
+            os.replace(tmp_path, target)
+            self.SNIPPET_FILENAME = target
         except Exception:
             try:
                 os.remove(tmp_path)

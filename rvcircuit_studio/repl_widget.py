@@ -120,6 +120,8 @@ class REPLWidget(QTextEdit):
         self._paste_mode = False
         self._debug_mode = False
         self._alt_screen = False
+        self._dbg_hold   = ""   # partial debug frame carried across polls
+        self._osc_hold   = ""   # partial OSC title sequence
 
         self._append_system("RV Circuit Studio - CircuitPython REPL")
         self._append_system("Connect a CircuitPython board to get started.")
@@ -205,6 +207,12 @@ class REPLWidget(QTextEdit):
             elif key == Qt.Key.Key_A:
                 self.selectAll()
                 return
+            elif key == Qt.Key.Key_V:
+                self.paste_to_board()
+                return
+            elif key == Qt.Key.Key_X:
+                self.copy()          # never cut the transcript
+                return
 
         if key == Qt.Key.Key_Backspace:
             self._write_bytes(b'\x7f')
@@ -214,14 +222,76 @@ class REPLWidget(QTextEdit):
             return
         elif key in (Qt.Key.Key_Up, Qt.Key.Key_Down,
                      Qt.Key.Key_Left, Qt.Key.Key_Right):
+            # Forward to the board's own line editor so the REPL has history
+            # and in-line cursor movement. These used to be swallowed.
+            self._write_bytes({
+                Qt.Key.Key_Up:    b'\x1b[A',
+                Qt.Key.Key_Down:  b'\x1b[B',
+                Qt.Key.Key_Right: b'\x1b[C',
+                Qt.Key.Key_Left:  b'\x1b[D',
+            }[key])
+            return
+        elif key == Qt.Key.Key_Home:
+            # NOT Ctrl+A: on an empty line that drops the board into the raw
+            # REPL. The board's line editor understands the escape form.
+            self._write_bytes(b'\x1b[H')
+            return
+        elif key == Qt.Key.Key_End:
+            # NOT Ctrl+E: that is paste mode, not end-of-line.
+            self._write_bytes(b'\x1b[F')
+            return
+        elif key == Qt.Key.Key_Tab:
+            self._write_bytes(b'\t')
             return
         elif key == Qt.Key.Key_Delete:
             self._write_bytes(b'\x1b[3~')
             return
 
         text = event.text()
-        if text:
-            self._write_bytes(text.encode('utf-8', errors='replace'))
+        if not text:
+            return
+        if ctrl:
+            # Pass through any other Ctrl combination as its control byte,
+            # the way a terminal would. Qt already gives us that in text().
+            if len(text) == 1 and ord(text[0]) < 0x20:
+                self._write_bytes(text.encode('latin-1'))
+            return
+        self._write_bytes(text.encode('utf-8', errors='replace'))
+
+    def paste_to_board(self):
+        """Send the clipboard to the board.
+
+        Multi-line pastes go through CircuitPython's paste mode (Ctrl+E, body,
+        Ctrl+D) so auto-indent does not mangle them. Previously Ctrl+V fell
+        through and sent a raw 0x16 byte.
+        """
+        from PySide6.QtWidgets import QApplication
+        data = QApplication.clipboard().text()
+        if not data or not self.is_connected:
+            return
+        data = data.replace("\r\n", "\n").replace("\r", "\n")
+        if "\n" in data.rstrip("\n"):
+            self._write_bytes(b'\x05')                     # enter paste mode
+            self._write_bytes(data.encode('utf-8', errors='replace'))
+            self._write_bytes(b'\x04')                     # execute
+        else:
+            self._write_bytes(data.rstrip("\n").encode('utf-8', errors='replace'))
+
+    def contextMenuEvent(self, event):
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        act_copy  = menu.addAction("Copy")
+        act_paste = menu.addAction("Paste to Board")
+        act_clear = menu.addAction("Clear")
+        act_copy.setEnabled(self.textCursor().hasSelection())
+        act_paste.setEnabled(self.is_connected)
+        chosen = menu.exec(event.globalPos())
+        if chosen is act_copy:
+            self.copy()
+        elif chosen is act_paste:
+            self.paste_to_board()
+        elif chosen is act_clear:
+            self.clear()
 
     def _write_bytes(self, data: bytes):
         if self._serial and self._serial.is_open:
@@ -262,7 +332,12 @@ class REPLWidget(QTextEdit):
                     return
                 # Always emit raw text to the debugger panel / plotter.
                 self.data_received.emit(text)
-                if not self._debug_mode:
+                if self._debug_mode:
+                    # Hide the protocol frames, keep user output and tracebacks.
+                    shown = self._strip_debug_frames(text)
+                    if shown:
+                        self._process_vt100(shown)
+                else:
                     self._process_vt100(text)
         except Exception as e:
             self._append_error(f"Read error: {e}")
@@ -271,7 +346,19 @@ class REPLWidget(QTextEdit):
     def _process_vt100(self, text: str):
         text = text.replace('\x7f', '')
         import re as _re
+        # CircuitPython sets the terminal title with an OSC sequence. If the
+        # terminator lands in the next poll the old single-shot regex missed
+        # it and the payload printed, so carry an unterminated one forward.
+        text = self._osc_hold + text
+        self._osc_hold = ""
         text = _re.sub(r'\x1b\].*?(?:\x07|\x1b\\)', '', text)
+        osc = text.rfind('\x1b]')
+        if osc != -1:
+            tail = text[osc:]
+            if '\x07' not in tail and '\x1b\\' not in tail:
+                if len(tail) < 512:      # cap so a lost terminator can't stall
+                    self._osc_hold = tail
+                text = text[:osc]
         if not text:
             return
         pos = 0
@@ -389,6 +476,67 @@ class REPLWidget(QTextEdit):
         cursor.insertText(text + "\n")
         self.setTextCursor(cursor)
         self.ensureCursorVisible()
+
+    _ALT_ON  = "\x1b[?1049h"
+    _ALT_OFF = "\x1b[?1049l"
+    _SIG_RE  = re.compile(r"\[(?:S|CW|CO)\][ \t]*\r?\n?")
+    # Tokens that must never be split across a poll boundary. _ALT_ON is in
+    # here because it begins with ESC-[, so a naive hold of a trailing "["
+    # would strand the ESC and break frame detection entirely.
+    _WHOLE_TOKENS = ("\x1b[?1049h", "[S]\r\n", "[CW]\r\n", "[CO]\r\n")
+
+    @classmethod
+    def _partial_tail(cls, s: str) -> int:
+        """Length of the longest suffix of *s* that is a proper prefix of a
+        token we need to see whole."""
+        best = 0
+        for tok in cls._WHOLE_TOKENS:
+            for n in range(min(len(tok) - 1, len(s)), best, -1):
+                if s.endswith(tok[:n]):
+                    best = n
+                    break
+        return best
+
+    def _strip_debug_frames(self, text: str) -> str:
+        """
+        Remove the alternate screen blocks the debugger uses to carry its JSON
+        state, plus the signal tokens the board echoes back from input(),
+        leaving everything else (user prints, tracebacks) visible.
+
+        Frames and signals can straddle a poll boundary, so an incomplete one
+        is held back rather than printed. The holdback is capped so a lost
+        terminator cannot stall output permanently.
+        """
+        buf = self._dbg_hold + text
+        out = []
+        while True:
+            start = buf.find(self._ALT_ON)
+            if start == -1:
+                out.append(buf)
+                buf = ""
+                break
+            end = buf.find(self._ALT_OFF, start)
+            if end == -1:
+                out.append(buf[:start])
+                buf = buf[start:]        # incomplete frame, wait for the rest
+                break
+            out.append(buf[:start])
+            buf = buf[end + len(self._ALT_OFF):]
+
+        shown = "".join(out)
+
+        n = self._partial_tail(shown)
+        if n:
+            buf = shown[-n:] + buf
+            shown = shown[:-n]
+
+        self._dbg_hold = buf
+        if len(self._dbg_hold) > 4096:
+            self._dbg_hold = ""
+
+        # Consume the whole echoed line, not just the token, or every signal
+        # leaves a blank line behind.
+        return self._SIG_RE.sub("", shown)
 
     def _filter_debug_noise(self, text: str) -> str:
         """Strip debug protocol noise from display."""
