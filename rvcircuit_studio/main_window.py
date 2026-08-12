@@ -700,6 +700,7 @@ class CircuitStudioEditor(QWidget):
         by the program ending on its own."""
         self._debug_bar.setVisible(False)
         self._clear_all_debug_highlights()
+        self.clear_error_highlights()
         self.repl_panel._debug_mode = False
         self.repl_panel._dbg_hold = ""
 
@@ -861,6 +862,18 @@ class CircuitStudioEditor(QWidget):
         self._traceback_buf = self._traceback_buf[-2048:]
         self._parse_traceback(self._traceback_buf)
 
+    def clear_error_highlights(self):
+        """Drop the red error line from every tab and forget the traceback."""
+        self._traceback_buf = ''
+        self._last_traceback = None
+        for i in range(self.editor_tab_widget.count()):
+            w = self.editor_tab_widget.widget(i)
+            if hasattr(w, 'clear_error_highlight'):
+                try:
+                    w.clear_error_highlight()
+                except Exception:
+                    pass
+
     def _parse_traceback(self, text: str):
         """Parse CircuitPython traceback and highlight the offending line."""
         import re
@@ -876,12 +889,31 @@ class CircuitStudioEditor(QWidget):
         matches = [m for m in matches if m.start() > last_tb]
         if not matches:
             return
-        m = matches[-1]
-        filename = m.group(1)
-        line_num = int(m.group(2))
-        if filename not in ('code.py', 'main.py'):
+        # Prefer the deepest frame that belongs to a file the user can see.
+        # Frames from the instrumented copies carry line numbers that do not
+        # correspond to anything in the original source, and <stdin> is the
+        # REPL itself.
+        frame = None
+        for m in reversed(matches):
+            name = os.path.basename(m.group(1))
+            if name.startswith('ide_debug_') or name.startswith('<'):
+                continue
+            if name in ('code.py', 'main.py'):
+                frame = (name, int(m.group(2)))
+                break
+        if frame is None:
             return
-        self._highlight_editor_line(filename, line_num)
+
+        # The rolling buffer keeps the last 2 KB of serial, and this runs on
+        # every chunk, so without this the same traceback is re-applied on
+        # every byte the board sends and the red line can never be cleared.
+        # The signature is the frame alone: anything derived from the buffer
+        # text keeps changing as more output arrives.
+        if frame == getattr(self, '_last_traceback', None):
+            return
+        self._last_traceback = frame
+
+        self._highlight_editor_line(*frame)
 
     def _highlight_editor_line(self, filename: str, line_num: int):
         """Find the open tab matching filename and highlight line_num.
@@ -891,6 +923,17 @@ class CircuitStudioEditor(QWidget):
             fp = getattr(widget, '_file_path', None) or getattr(widget, 'current_file', None)
             if fp and os.path.basename(fp) == filename:
                 if hasattr(widget, 'highlight_error_line'):
+                    # A stale or mismatched traceback can name a line past the
+                    # end of the file. Painting it would put the marker on an
+                    # arbitrary line.
+                    # Drop any previous mark first, so a rejected line does
+                    # not leave the old one painted.
+                    try:
+                        widget.clear_error_highlight()
+                        if line_num > widget.qpart.document().blockCount():
+                            return
+                    except Exception:
+                        pass
                     self.editor_tab_widget.setCurrentIndex(i)
                     widget.highlight_error_line(line_num)
                 return

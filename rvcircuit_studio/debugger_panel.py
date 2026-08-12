@@ -713,6 +713,24 @@ class DebuggerPanel(QWidget):
         except (RuntimeError, TypeError):
             pass
 
+        # qutepart also binds Ctrl+B to its bookmark toggle, writing the same
+        # margin bit with no steppable check. Repoint it at the breakpoint
+        # toggle instead of leaving a second, looser path to the same state.
+        try:
+            act = qpart.toggleBookmarkAction
+            try:
+                act.triggered.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            act.setText("Toggle breakpoint")
+            act.triggered.connect(
+                lambda _=False, q=qpart: self._toggle_breakpoint(
+                    q, q.textCursor().block(), filename))
+        except AttributeError:
+            pass
+        # Alt+PgUp / Alt+PgDown navigate between marked blocks, which are now
+        # breakpoints. They only move the cursor, so they stay as they are.
+
         def _on_gutter_click(block):
             self._toggle_breakpoint(qpart, block, filename)
 
@@ -1105,6 +1123,50 @@ class DebuggerPanel(QWidget):
             return          # session was cancelled while we waited
         if not ok:
             self._interrupt_attempt()
+            return
+        self._soft_reboot()
+
+    def _soft_reboot(self):
+        """Ctrl+D, then interrupt back to the prompt.
+
+        A soft reboot is the only thing that releases claimed pins. Without it
+        a second debug session hits 'ValueError: LED in use', because the
+        previous session's objects are still bound in the REPL namespace from
+        'from ide_debug_code import *'.
+
+        This runs code.py again on the way, so the interrupt afterwards is
+        prompt driven with retries rather than a fixed delay.
+        """
+        self._toolbar.set_status("Resetting board...", CS_TEXT_MUTED)
+        self._start_attempts = 0
+        self._tx(b"\x04")
+        QTimer.singleShot(300, self._post_reboot_attempt)
+
+    def _post_reboot_attempt(self):
+        if self._pending_start is None:
+            return
+        if self._start_attempts >= self._MAX_INTERRUPT_ATTEMPTS:
+            self._start_failed(
+                "Could Not Reach the REPL",
+                "The board rebooted but never returned a >>> prompt.\n\n"
+                "code.py is probably inside a long blocking call. Try again, "
+                "or temporarily replace code.py with a short program."
+            )
+            return
+        self._start_attempts += 1
+        self._toolbar.set_status(
+            f"Resetting board ({self._start_attempts})...", CS_TEXT_MUTED
+        )
+        self._tx(b"\x03")
+        QTimer.singleShot(80, lambda: self._tx(b"\x03"))
+        QTimer.singleShot(160, lambda: self._tx(b"\r"))
+        self._wait_for(self._PROMPT, 1500, self._on_post_reboot_result)
+
+    def _on_post_reboot_result(self, ok: bool):
+        if self._pending_start is None:
+            return
+        if not ok:
+            self._post_reboot_attempt()
             return
         self._write_and_import()
 
