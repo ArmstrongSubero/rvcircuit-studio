@@ -171,9 +171,11 @@ However should work with any CircuitPython board.
 
 ## Scope
 
-RV Circuit Studio is a curated CircuitPython environment, not a universal one. Everything the tooling manages is tested by me against tagged CircuitPython releases. The suggested supported boards are listed above. A board appears on that list because it has been brought up and verified here, not because a port exists somewhere, Boards outside the list are not blocked, they are simply not managed. 
+CircuitPython's strength is that it works out of the box. Circuit Studio is built to preserve that on selected RISC-V hardware and the Raspberry Pi Pico, which means being deliberate about what ships as supported.
 
-Library Manager surfaces the Adafruit bundle only, that bundle is built and tested against tagged CircuitPython releases on a known cadence. The Community Bundle contains real work, but it also contains libraries that are unmaintained or that have not tracked recent CircuitPython, and I cannot verify that surface area. If something appears in Library Manager, it should just work. Anything outside these lines still runs, drop the .mpy or the library folder into lib/ and Circuit Studio treats it like any other library. The curation applies to what the tool manages for you, not to what the tool permits.
+RV Circuit Studio is a curated CircuitPython environment, not a universal one. Everything the tooling manages is tested against tagged CircuitPython releases. The suggested supported boards are listed above. A board appears on that list because it has been brought up and verified here, not because a port exists somewhere, boards outside the list are not blocked, they are simply not managed. 
+
+Library Manager surfaces the Adafruit bundle only, as that bundle is built and tested against tagged CircuitPython releases on a known cadence. The Community Bundle contains real work, but it also contains libraries that are unmaintained or that have not tracked recent CircuitPython, and I cannot verify that surface area. If something appears in Library Manager, it should just work. Anything outside these lines still runs, drop the .mpy or the library folder into lib/ and Circuit Studio treats it like any other library. The curation applies to what the tool manages for you, not to what the tool permits.
 
 Requests to widen the supported set are welcome as information, but the answer is usually no, and that is the product working as intended, the philosophies of the project are support a few things well and verify on hardware than try to support everything in the spirit of the original Arduino era. 
 
